@@ -1,0 +1,94 @@
+# Matheran trading engine config. Copy to config.yaml and edit.
+# Secrets do NOT live here - they come from .env / environment variables.
+
+server:
+  host: "127.0.0.1"        # keep on loopback; this service can place real orders
+  port: 8787
+
+# paper  = no broker orders, fills simulated at candle/LTP prices (default, safe)
+# live   = real orders are sent to the broker
+mode: paper
+
+broker:
+  # Who executes orders. Dhan order placement needs a whitelisted static IP
+  # (SEBI requirement); read-only endpoints do not.
+  name: dhan               # dhan | stoxkart | paper
+
+  # Who supplies candles and quotes. Dhan charges ₹499 + taxes/month for Data APIs;
+  # Upstox serves candles free and with no credentials at all, so this is the default
+  # pairing: free data, Dhan execution.
+  #   upstox    - free, no credentials needed
+  #   dhan      - needs the Dhan Data API subscription
+  #   synthetic - generated prices, for exploring the UI
+  #   (empty)   - the execution broker also supplies data
+  data_broker: upstox
+
+engine:
+  poll_seconds: 15         # how often watches are re-evaluated
+  approval_ttl_seconds: 300  # a pending approval expires after this
+  cooldown_seconds: 120    # wait after an exit before re-arming the same watch
+  max_trades_per_day: 4    # per watch
+  max_open_positions: 3    # across all watches
+  square_off_time: "15:15" # IST, force-exit intraday positions (delivery is carried)
+  no_new_entry_after: "15:00"  # intraday entries only
+  market_open: "09:15"
+  market_close: "15:30"
+  default_product: INTRADAY    # INTRADAY | DELIVERY (CNC for shares, NRML for F&O)
+
+strategy:
+  timeframe_minutes: 5     # 1 3 5 9 15 30 60 120 | 1440 = day, 10080 = week, 43200 = month
+  rsi_period: 21
+  rsi_signal_entry_period: 21   # EMA(RSI(21), 21) - entry signal line
+  rsi_signal_exit_period: 9     # EMA(RSI(21), 9)  - exit signal line
+  supertrend_period: 21
+  supertrend_factor: 0.618
+  price_ema_period: 21     # shown in the options table
+  adx_period: 14
+  adx_min: 20.0            # options strategy gate; null disables
+  require_adx: false       # equity strategy: false (per intraday_swing.md)
+
+  # "state"  -> condition is true whenever RSI > signal (matches "or greater than")
+  # "cross"  -> condition only true on the bar where it crosses above (stricter)
+  entry_condition_mode: state
+  exit_condition_mode: state   # only read while exit_rules is null
+
+  # Exit conditions, one row each, as built on the Strategy tab. Rows are joined by
+  # AND / OR (AND binds tighter, as in Pine). `on: close` checks the last closed
+  # candle, and only candles that closed after the position was opened; `on: live`
+  # checks the forming candle at the live price. Written for a long; a short uses the
+  # mirror image. null = the two rows below, built from the settings above.
+  #   ind: close | open | high | low | vwap | ema | sma | supertrend | rsi | rsi_ema
+  #        | adx | plus_di | minus_di | atr | value
+  #   op:  crosses_below | crosses_above | below | above | at_or_below | at_or_above
+  exit_rules: null
+  # exit_rules:
+  #   - left:  {ind: rsi, period: 21}
+  #     op:    below
+  #     right: {ind: rsi_ema, rsi: 21, period: 9}
+  #     on:    close
+  #   - join:  OR
+  #     left:  {ind: close}
+  #     op:    below
+  #     right: {ind: supertrend, period: 21, factor: 0.618}
+  #     on:    close
+
+risk:
+  stop_loss_pct: 3.0       # % of capital deployed on that leg -> 3% adverse price move
+  target_pct: null         # e.g. 6.0 for a 2:1 take-profit; null = no TP
+  place_stop_at_broker: true   # also send an SL-M order so you are covered if this app dies
+  # What closes a position unless a watch, basket or order says otherwise:
+  #   both      - stop / target / trailing, and the exit conditions above
+  #   sl_target - stop / target / trailing only
+  #   strategy  - the exit conditions only: no stop at all
+  exit_mode: both
+  # Trailing profit: once a trade is trail_profit_trigger_pct in profit, the stop follows
+  # the best price at trail_profit_value (% of that price, or points) and never moves
+  # back. Both null = off.
+  trail_profit_trigger_pct: null   # e.g. 1.0
+  trail_profit_value: null         # e.g. 0.5
+  trail_profit_unit: pct           # pct | pts
+
+options:
+  otm_count: 5             # ATM plus 5 OTM strikes each side
+  default_underlying: NIFTY
+  expiry: nearest          # nearest | YYYY-MM-DD
