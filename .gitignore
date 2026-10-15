@@ -7,3 +7,10 @@ data/
 cache/
 logs/
 .DS_Store
+web/node_modules/
+web/dist/
+web/.wrangler/
+web/test-results/
+web/playwright-report/
+.agents/
+.worktrees/

@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "matheran",
+  "compatibility_date": "2026-10-07",
+  // Assets-only Worker: no "main" script. Vite builds into dist/.
+  "assets": {
+    "directory": "./dist",
+    // /charts -> charts/index.html; /charts/ redirects to /charts
+    "html_handling": "drop-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}
