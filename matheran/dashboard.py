@@ -150,6 +150,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .ordbody td, .ordbody th { padding:4px 6px; }
   .ordbody input.lim { width:104px; }
   td.rdy { font-weight:650; color:var(--up); }
+
+  /* Scanner */
+  #p-scanner h3 { font-size:13px; margin:14px 0 6px; font-weight:650; }
+  #p-scanner fieldset { border:1px solid var(--line); border-radius:8px; padding:8px 12px 10px; margin:0 0 12px; }
+  #p-scanner legend { color:var(--muted); font-size:12px; padding:0 4px; }
+  .scunis { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:6px 14px; }
+  .scunis .err { color:#ffb3b3; font-size:12px; display:block; }
+  ul.chips { list-style:none; display:flex; flex-wrap:wrap; gap:6px; padding:0; margin:8px 0 0; }
+  ul.chips li { border:1px solid var(--line); border-radius:999px; padding:2px 4px 2px 10px;
+    font-size:12.5px; display:flex; align-items:center; gap:6px; background:var(--panel2); }
+  ul.chips:empty { display:none; }
+  #scProg { width:min(420px, 100%); height:12px; vertical-align:middle; }
+  .scprog { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; font-size:13px; }
+  th button.sortb { background:none; border:none; padding:0; color:inherit; font:inherit;
+    text-transform:inherit; cursor:pointer; }
+  th button.sortb:hover { color:var(--text); }
+  table.scres td.l, table.scres th.l { text-align:left; }
+  table.scres caption { text-align:left; font-weight:650; padding:4px 0 6px; }
+  table.scres { margin-bottom:14px; }
+  table.scres tbody th { color:var(--text); text-transform:none; font-size:inherit; font-weight:600; }
+  #scNotes { margin:6px 0 0; padding-left:18px; }
+  #scNotes:empty { display:none; }
 </style>
 </head>
 <body>
@@ -177,6 +199,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button role="tab" id="tab-setup"    aria-controls="p-setup"    aria-selected="false">Setup</button>
     <button role="tab" id="tab-trade"    aria-controls="p-trade"    aria-selected="true">Trade</button>
     <button role="tab" id="tab-options"  aria-controls="p-options"  aria-selected="false">Options</button>
+    <button role="tab" id="tab-scanner"  aria-controls="p-scanner"  aria-selected="false">Scanner</button>
     <button role="tab" id="tab-baskets"  aria-controls="p-baskets"  aria-selected="false">Baskets</button>
     <button role="tab" id="tab-strategy" aria-controls="p-strategy" aria-selected="false">Strategy</button>
     <button role="tab" id="tab-journal"  aria-controls="p-journal"  aria-selected="false">Journal</button>
@@ -384,6 +407,133 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
       </section>
     </div>
+  </div>
+
+  <!-- ============================= SCANNER ============================= -->
+  <!-- Scanner controls carry their own ids and data-sc-* attributes only: never
+       data-sec / data-key, which the Strategy tab's Save collects page-wide. -->
+  <div role="tabpanel" id="p-scanner" aria-labelledby="tab-scanner" hidden>
+    <section class="panel" aria-labelledby="scCondHead">
+      <h2 id="scCondHead">Conditions</h2>
+      <p class="sub">A live BUY / SELL screener. It only reads market data: it never places an
+        order or creates a watch. Each row is one condition on its own timeframe, written like
+        the exit rules on the Strategy tab. <strong>live</strong> reads the forming candle at the
+        live price (as TradingView draws it); <strong>last closed candle</strong> waits for the
+        close. Rows are joined by AND / OR, AND binding tighter. A row without enough history is
+        n/a and counts as not met.</p>
+      <h3 id="scBuyHead">BUY when</h3>
+      <div class="scroll">
+        <table class="rules">
+          <caption class="sr">BUY conditions</caption>
+          <thead><tr>
+            <th class="l" scope="col">Join</th><th class="l" scope="col">Timeframe</th>
+            <th class="l" scope="col">Indicator</th><th class="l" scope="col">Condition</th>
+            <th class="l" scope="col">Compared with</th><th class="l" scope="col">Checked</th>
+            <th scope="col"><span class="sr">Move or remove</span></th>
+          </tr></thead>
+          <tbody id="scBuyRows"><tr><td colspan="7" class="l mut">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top:10px;align-items:center">
+        <button type="button" id="scBuyAdd">+ Add condition</button>
+        <button type="button" id="scReset" title="Back to the seven default BUY conditions">Reset to defaults</button>
+      </div>
+      <h3 id="scSellHead">SELL when</h3>
+      <label class="inline" for="scLinked"><input type="checkbox" id="scLinked" checked />
+        SELL mirrors BUY (above ↔ below, RSI levels reflected around 50)</label>
+      <div class="scroll" style="margin-top:8px">
+        <table class="rules">
+          <caption class="sr">SELL conditions</caption>
+          <thead><tr>
+            <th class="l" scope="col">Join</th><th class="l" scope="col">Timeframe</th>
+            <th class="l" scope="col">Indicator</th><th class="l" scope="col">Condition</th>
+            <th class="l" scope="col">Compared with</th><th class="l" scope="col">Checked</th>
+            <th scope="col"><span class="sr">Move or remove</span></th>
+          </tr></thead>
+          <tbody id="scSellRows"><tr><td colspan="7" class="l mut">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top:10px;align-items:center">
+        <button type="button" id="scSellAdd" hidden>+ Add SELL condition</button>
+      </div>
+      <div id="scRuleText" class="rulebox" aria-live="polite"></div>
+      <div class="row" style="margin-top:12px;align-items:center">
+        <button type="button" id="scSave" class="go">Save scanner settings</button>
+        <span id="scSaveState" class="mut" style="font-size:12.5px" role="status"></span>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="scWhatHead">
+      <h2 id="scWhatHead">What to scan</h2>
+      <fieldset>
+        <legend>Universes</legend>
+        <div id="scUnis" class="scunis"><span class="mut">Loading…</span></div>
+      </fieldset>
+      <div class="row" style="align-items:flex-end">
+        <label class="f" for="scSym">Custom symbol
+          <input id="scSym" list="scSymList" autocomplete="off" spellcheck="false" size="24"
+                 aria-label="Add a custom symbol" aria-describedby="scSymHint"
+                 placeholder="RELIANCE, BSE:TCS, MCX:GOLD" /></label>
+        <button type="button" id="scSymAdd">Add</button>
+        <span id="scSymHint" class="mut" style="font-size:12.5px;align-self:center">e.g. RELIANCE, BSE:TCS, MCX:GOLD</span>
+      </div>
+      <datalist id="scSymList"></datalist>
+      <ul id="scChips" class="chips" aria-label="Custom symbols"></ul>
+      <p class="sub" style="margin:10px 0 0"><span id="scTotal" aria-live="polite"></span></p>
+    </section>
+
+    <section class="panel" aria-labelledby="scRunHead">
+      <h2 id="scRunHead">Run</h2>
+      <div class="row">
+        <label class="f" for="scSide">Side
+          <select id="scSide">
+            <option value="both">Both</option><option value="buy">BUY only</option>
+            <option value="sell">SELL only</option>
+          </select></label>
+        <label class="f" for="scEval">Evaluation
+          <select id="scEval">
+            <option value="auto">Auto</option><option value="complete">Every condition</option>
+            <option value="lazy">Stop at the first failed condition</option>
+          </select></label>
+        <label class="f" for="scAuto">Auto-rescan
+          <select id="scAuto" aria-describedby="scAutoHint">
+            <option value="0">Off</option><option value="2">every 2 min</option>
+            <option value="5">every 5 min</option><option value="10">every 10 min</option>
+            <option value="15">every 15 min</option><option value="30">every 30 min</option>
+            <option value="60">every 60 min</option>
+          </select></label>
+        <button type="button" id="scRun" class="go">Run scan</button>
+        <button type="button" id="scCancel" class="danger" disabled>Cancel</button>
+      </div>
+      <p id="scAutoHint" class="mut" style="font-size:12.5px;margin:6px 0 0" hidden></p>
+      <p id="scEst" class="sub" style="margin:10px 0 0" aria-live="polite"></p>
+      <div class="scprog">
+        <progress id="scProg" max="1" value="0" aria-label="Scan progress"></progress>
+        <span id="scProgText" class="mut">No scan yet.</span>
+      </div>
+      <span id="scSr" class="sr" role="status" aria-live="polite"></span>
+      <p id="scBudget" class="sub" style="margin:8px 0 0"></p>
+    </section>
+
+    <section class="panel" aria-labelledby="scResHead">
+      <h2 id="scResHead">Results</h2>
+      <div class="row" style="margin-bottom:10px">
+        <label class="f" for="scFilter">Show
+          <select id="scFilter">
+            <option value="match">Matches only</option>
+            <option value="atleast">At least N conditions met</option>
+            <option value="all">Everything scanned</option>
+          </select></label>
+        <label class="f" for="scMinMet" id="scMinWrap" hidden>N conditions
+          <input id="scMinMet" type="number" min="0" max="12" step="1" value="5" /></label>
+      </div>
+      <div id="scTables"><p class="mut">Run a scan to see results.</p></div>
+      <p id="scFooter" class="sub" style="margin:4px 0 0"></p>
+      <ul id="scNotes" class="sub"></ul>
+      <span id="scBseNote" class="sr">Opens the add-watch form. With Upstox market data, BSE
+        watches do not get candles yet (see README)</span>
+      <span id="scIsinNote" class="sr">not chartable here: listed by ISIN only</span>
+    </section>
   </div>
 
   <!-- ============================= BASKETS ============================= -->
@@ -595,7 +745,9 @@ async function api(path, opts = {}) {
   try { body = text ? JSON.parse(text) : null; } catch (e) { body = { detail: text }; }
   if (!res.ok) {
     const d = body && body.detail;
-    throw new Error(typeof d === "string" ? d : JSON.stringify(d || res.statusText));
+    const err = new Error(typeof d === "string" ? d : JSON.stringify(d || res.statusText));
+    err.status = res.status;   // network failures reject before this, without a status
+    throw err;
   }
   return body;
 }
@@ -664,7 +816,7 @@ let RISK = {};            // /api/status risk block: defaults for the order dial
 let HAS_RULES = true;     // whether the Strategy tab has any exit conditions
 
 /* --------------------------------------------------------------------- tabs */
-const TABS = ["setup", "trade", "options", "baskets", "strategy", "journal"];
+const TABS = ["setup", "trade", "options", "scanner", "baskets", "strategy", "journal"];
 function showTab(name) {
   TAB = name;
   TABS.forEach((t) => {
@@ -678,6 +830,7 @@ function showTab(name) {
   if (name === "setup" || name === "strategy") loadSettings();
   if (name === "journal") loadJournal();
   if (name === "options") loadExpiries();
+  if (name === "scanner") loadScanner();
   if (name === "trade") loadTrade();
   if (name === "baskets") { ensureLegRows(); loadBaskets(); }
 }
@@ -981,66 +1134,141 @@ function loadRules(er) {
     : "the default two conditions (not yet customised)";
 }
 
-function operandCell(i, side, o) {
-  const choices = RULE_CAT.operands.filter((x) => side === "right" || x.left);
-  const spec = operandSpec(o.ind) || { label: o.ind, params: [] };
-  const what = side === "left" ? "indicator" : "compared with";
-  const sel = `<select class="rsel" data-row="${i}" data-side="${side}"
-      aria-label="Condition ${i + 1} ${what}">
-    ${choices.map((x) => `<option value="${esc(x.id)}" ${x.id === o.ind ? "selected" : ""}>${esc(x.label)}</option>`).join("")}
-    </select>`;
-  const params = spec.params.map((p) => `<label class="pp">${esc(p.label)}
-      <input type="text" inputmode="decimal" autocomplete="off" class="rp" size="5"
-        data-row="${i}" data-side="${side}" data-key="${esc(p.key)}"
-        value="${esc(o[p.key] == null ? p.default : o[p.key])}"
-        aria-label="Condition ${i + 1} ${esc(spec.label)} ${esc(p.label.toLowerCase())}" /></label>`).join("");
-  return `<div class="opnd">${sel}${params}</div>`;
-}
+/* One table of condition rows. Used by the Strategy tab (exit rules) and the Scanner (BUY and SELL).
+   o = { tbody, addBtn, rows: () => array, catalog: () => cat,
+         label: "Condition", labelLower: "condition",
+         timeframes: false, reorder: false, readOnly: () => false, colspan: 6,
+         paramAttr: "key", emptyHtml: "...", newRow: () => row, onChange: (rerender) => void }
+   With the Strategy options the markup is exactly the one the tab has always drawn. */
+function makeRuleEditor(o) {
+  const label = esc(o.label || "Condition"), lower = esc(o.labelLower || "condition");
+  const PA = o.paramAttr || "key";
+  const cat = () => o.catalog();
+  const ro = () => !!(o.readOnly && o.readOnly());
+  const dis = () => (ro() ? " disabled" : "");
+  const specOf = (id) => (cat().operands || []).find((x) => x.id === id);
+  const fresh = (id) => {
+    const spec = specOf(id);
+    const out = { ind: id };
+    for (const p of (spec ? spec.params : [])) out[p.key] = p.default;
+    return out;
+  };
 
-function renderRules() {
-  const tb = $("ruleRows");
-  if (!RULE_CAT) return;
-  if (!RULES.length) {
-    tb.innerHTML = `<tr><td colspan="6" class="l mut">No indicator conditions: positions close
-      on the stop, the target or the square-off only.</td></tr>`;
-  } else {
-    tb.innerHTML = RULES.map((r, i) => `<tr>
+  function operandCell(i, side, op) {
+    const choices = cat().operands.filter((x) => side === "right" || x.left);
+    const spec = specOf(op.ind) || { label: op.ind, params: [] };
+    const what = side === "left" ? "indicator" : "compared with";
+    const sel = `<select class="rsel" data-row="${i}" data-side="${side}"${dis()}
+      aria-label="${label} ${i + 1} ${what}">
+    ${choices.map((x) => `<option value="${esc(x.id)}" ${x.id === op.ind ? "selected" : ""}>${esc(x.label)}</option>`).join("")}
+    </select>`;
+    const params = spec.params.map((p) => `<label class="pp">${esc(p.label)}
+      <input type="text" inputmode="decimal" autocomplete="off" class="rp" size="5"
+        data-row="${i}" data-side="${side}" data-${PA}="${esc(p.key)}"${dis()}
+        value="${esc(op[p.key] == null ? p.default : op[p.key])}"
+        aria-label="${label} ${i + 1} ${esc(spec.label)} ${esc(p.label.toLowerCase())}" /></label>`).join("");
+    return `<div class="opnd">${sel}${params}</div>`;
+  }
+
+  function tfCell(i, r) {
+    return `<select class="rtf" data-row="${i}"${dis()} aria-label="${label} ${i + 1} timeframe">
+        ${(cat().timeframes || []).map((t) => `<option value="${esc(t.id)}" ${t.id === r.tf ? "selected" : ""}>${esc(t.id)}</option>`).join("")}
+      </select>`;
+  }
+
+  function lastCell(i, count) {
+    if (ro()) return "";
+    const moves = o.reorder
+      ? `<button type="button" class="sm rmv" data-row="${i}" data-dir="-1" ${i === 0 ? "disabled" : ""}
+            aria-label="Move ${lower} ${i + 1} up">↑</button>
+         <button type="button" class="sm rmv" data-row="${i}" data-dir="1" ${i === count - 1 ? "disabled" : ""}
+            aria-label="Move ${lower} ${i + 1} down">↓</button>
+         ` : "";
+    return `${moves}<button type="button" class="sm rdel" data-row="${i}"
+            aria-label="Remove ${lower} ${i + 1}">✕</button>`;
+  }
+
+  function render() {
+    const tb = o.tbody;
+    if (!cat()) return;
+    const RULES = o.rows();
+    const C = cat();
+    if (!RULES.length) {
+      tb.innerHTML = o.emptyHtml;
+    } else {
+      tb.innerHTML = RULES.map((r, i) => `<tr>
       <td class="l">${i === 0 ? '<span class="mut">IF</span>'
-        : `<select class="rjoin" data-row="${i}" aria-label="How condition ${i + 1} joins the one above">
+        : `<select class="rjoin" data-row="${i}"${dis()} aria-label="How ${lower} ${i + 1} joins the one above">
              <option value="AND" ${r.join === "AND" ? "selected" : ""}>AND</option>
-             <option value="OR" ${r.join === "OR" ? "selected" : ""}>OR</option></select>`}</td>
+             <option value="OR" ${r.join === "OR" ? "selected" : ""}>OR</option></select>`}</td>${o.timeframes ? `
+      <td class="l">${tfCell(i, r)}</td>` : ""}
       <td class="l">${operandCell(i, "left", r.left)}</td>
-      <td class="l"><select class="rop" data-row="${i}" aria-label="Condition ${i + 1} comparison">
-        ${RULE_CAT.comparators.map((c) => `<option value="${esc(c.id)}" ${c.id === r.op ? "selected" : ""}>${esc(c.label)}</option>`).join("")}
+      <td class="l"><select class="rop" data-row="${i}"${dis()} aria-label="${label} ${i + 1} comparison">
+        ${C.comparators.map((c) => `<option value="${esc(c.id)}" ${c.id === r.op ? "selected" : ""}>${esc(c.label)}</option>`).join("")}
       </select></td>
       <td class="l">${operandCell(i, "right", r.right)}</td>
-      <td class="l"><select class="ron" data-row="${i}" aria-label="When condition ${i + 1} is checked">
-        ${RULE_CAT.on.map((o) => `<option value="${esc(o.id)}" ${o.id === r.on ? "selected" : ""}>${esc(o.label)}</option>`).join("")}
+      <td class="l"><select class="ron" data-row="${i}"${dis()} aria-label="When ${lower} ${i + 1} is checked">
+        ${C.on.map((x) => `<option value="${esc(x.id)}" ${x.id === r.on ? "selected" : ""}>${esc(x.label)}</option>`).join("")}
       </select></td>
-      <td><button type="button" class="sm rdel" data-row="${i}"
-            aria-label="Remove condition ${i + 1}">✕</button></td>
+      <td>${lastCell(i, RULES.length)}</td>
     </tr>`).join("");
-  }
-  $("ruleAdd").disabled = RULES.length >= (RULE_CAT.max_rules || 12);
+    }
+    if (o.addBtn) {
+      o.addBtn.disabled = RULES.length >= (C.max_rules || 12);
+      if (o.readOnly) o.addBtn.hidden = ro();
+    }
+    if (ro()) return;
 
-  const row = (el) => RULES[Number(el.dataset.row)];
-  tb.querySelectorAll(".rsel").forEach((el) => {
-    el.onchange = () => { row(el)[el.dataset.side] = freshOperand(el.value); rulesChanged(true); };
-  });
-  tb.querySelectorAll(".rp").forEach((el) => {
-    el.oninput = () => {
-      row(el)[el.dataset.side][el.dataset.key] = el.value.trim();
-      el.classList.toggle("bad", el.value.trim() !== "" && !Number.isFinite(Number(el.value)));
-      rulesChanged(false);
+    const row = (el) => o.rows()[Number(el.dataset.row)];
+    tb.querySelectorAll(".rsel").forEach((el) => {
+      el.onchange = () => { row(el)[el.dataset.side] = fresh(el.value); o.onChange(true); };
+    });
+    tb.querySelectorAll(".rp").forEach((el) => {
+      el.oninput = () => {
+        row(el)[el.dataset.side][el.dataset[PA]] = el.value.trim();
+        el.classList.toggle("bad", el.value.trim() !== "" && !Number.isFinite(Number(el.value)));
+        o.onChange(false);
+      };
+    });
+    tb.querySelectorAll(".rop").forEach((el) => { el.onchange = () => { row(el).op = el.value; o.onChange(false); }; });
+    tb.querySelectorAll(".rjoin").forEach((el) => { el.onchange = () => { row(el).join = el.value; o.onChange(false); }; });
+    tb.querySelectorAll(".ron").forEach((el) => { el.onchange = () => { row(el).on = el.value; o.onChange(false); }; });
+    tb.querySelectorAll(".rtf").forEach((el) => { el.onchange = () => { row(el).tf = el.value; o.onChange(false); }; });
+    tb.querySelectorAll(".rdel").forEach((el) => {
+      el.onclick = () => { o.rows().splice(Number(el.dataset.row), 1); o.onChange(true); };
+    });
+    tb.querySelectorAll(".rmv").forEach((el) => {
+      el.onclick = () => {
+        const list = o.rows(), i = Number(el.dataset.row), d = Number(el.dataset.dir), j = i + d;
+        if (j < 0 || j >= list.length) return;
+        [list[i], list[j]] = [list[j], list[i]];
+        o.onChange(true);
+        // Focus stays on the same button, now on the moved row.
+        const same = tb.querySelector(`.rmv[data-row="${j}"][data-dir="${d}"]`);
+        const other = tb.querySelector(`.rmv[data-row="${j}"][data-dir="${-d}"]`);
+        if (same && !same.disabled) same.focus(); else if (other) other.focus();
+      };
+    });
+  }
+
+  if (o.addBtn && o.newRow) {
+    o.addBtn.onclick = () => {
+      if (!cat() || ro()) return;
+      o.rows().push(o.newRow(fresh));
+      o.onChange(true);
     };
-  });
-  tb.querySelectorAll(".rop").forEach((el) => { el.onchange = () => { row(el).op = el.value; rulesChanged(false); }; });
-  tb.querySelectorAll(".rjoin").forEach((el) => { el.onchange = () => { row(el).join = el.value; rulesChanged(false); }; });
-  tb.querySelectorAll(".ron").forEach((el) => { el.onchange = () => { row(el).on = el.value; rulesChanged(false); }; });
-  tb.querySelectorAll(".rdel").forEach((el) => {
-    el.onclick = () => { RULES.splice(Number(el.dataset.row), 1); rulesChanged(true); };
-  });
+  }
+  return { render, fresh };
 }
+
+const STRATEGY_RULES = makeRuleEditor({
+  tbody: $("ruleRows"), addBtn: $("ruleAdd"), rows: () => RULES, catalog: () => RULE_CAT,
+  label: "Condition", labelLower: "condition", colspan: 6,
+  emptyHtml: `<tr><td colspan="6" class="l mut">No indicator conditions: positions close
+      on the stop, the target or the square-off only.</td></tr>`,
+  onChange: (rerender) => rulesChanged(rerender),
+});
+function renderRules() { STRATEGY_RULES.render(); }
 
 function rulesChanged(rerender) {
   RULES_DIRTY = true;
@@ -2008,6 +2236,822 @@ async function loadJournal() {
       };
     });
   } catch (e) {}
+}
+
+/* ---------------------------------------------------------------- scanner */
+/* Read-only: the Scanner never places an order or creates a watch. Every string the
+   server sends (names, notes, messages, details, labels) goes through esc() or
+   textContent. Controls are read by id; none carries data-sec / data-key. */
+const SC = {
+  loaded: false,        // GET /api/scanner answered at least once
+  cat: null,            // scanner catalog (rules catalog + on + timeframes)
+  defaults: null,       // { buy_rules }
+  config: {},           // saved scanner options (max_requests_per_30min, …)
+  buy: [], sell: [],    // the rows on screen
+  linked: true,         // SELL mirrors BUY
+  buyReset: false,      // BUY rows are the defaults and untouched: Save sends null
+  dirty: false,         // edited since the last load or save (survives tab switches)
+  unis: [],             // universes info()
+  uniSel: new Set(),    // ticked universe ids
+  uniLoading: new Set(),
+  custom: [],           // "NSE:RELIANCE", "BSE:TCS", "MCX:GOLD"
+  canSave: false, mcxCharts: true, dataSource: "",
+  scan: null,           // the last status summary seen
+  scanId: null,         // the job id SC.results/SC.next belong to (F11)
+  next: 0,              // since cursor for /api/scanner/status
+  results: [],
+  pollTimer: null, pollSeq: 0,
+  ownJobs: new Set(),   // ids of the jobs this page started
+  auto: null,           // auto-rescan: { interval, armed, timer, failures }; null = not armed
+  lastState: "", lastDecile: -1, renderKey: "", focusCancel: false, estimate: null,
+  previewTimer: null, estTimer: null, estSeq: 0, symTimer: null, extraLoaded: false,
+  sort: { BUY: { key: "met", dir: -1 }, SELL: { key: "met", dir: -1 } },
+};
+const SC_ACTIVE = ["loading", "running", "waiting", "cancelling"];
+const scActive = () => !!(SC.scan && SC_ACTIVE.includes(SC.scan.state));
+const fmtInt = (v) => (v == null || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("en-IN"));
+function fmtDur(s) {
+  s = Math.max(0, Math.round(Number(s) || 0));
+  if (s < 60) return s + " s";
+  if (s < 3600) return Math.round(s / 60) + " min";
+  return Math.floor(s / 3600) + " h " + Math.round((s % 3600) / 60) + " min";
+}
+const fmtMS = (s) => { s = Math.max(0, Math.round(Number(s) || 0));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+
+const SC_BUY = makeRuleEditor({
+  tbody: $("scBuyRows"), addBtn: $("scBuyAdd"), rows: () => SC.buy, catalog: () => SC.cat,
+  label: "BUY condition", labelLower: "BUY condition", timeframes: true, reorder: true,
+  readOnly: () => false, colspan: 7, paramAttr: "pk",
+  emptyHtml: '<tr><td colspan="7" class="l mut">No BUY conditions: add at least one.</td></tr>',
+  newRow: (fresh) => ({ tf: "15m", join: "AND", left: fresh("close"), op: "above",
+                        right: fresh("vwap"), on: "live" }),
+  onChange: (rerender) => { SC.buyReset = false; scChanged(rerender ? "buy" : ""); },
+});
+const SC_SELL = makeRuleEditor({
+  tbody: $("scSellRows"), addBtn: $("scSellAdd"), rows: () => SC.sell, catalog: () => SC.cat,
+  label: "SELL condition", labelLower: "SELL condition", timeframes: true, reorder: true,
+  readOnly: () => SC.linked, colspan: 7, paramAttr: "pk",
+  emptyHtml: '<tr><td colspan="7" class="l mut">No SELL conditions: add at least one.</td></tr>',
+  newRow: (fresh) => ({ tf: "15m", join: "AND", left: fresh("close"), op: "below",
+                        right: fresh("vwap"), on: "live" }),
+  onChange: (rerender) => scChanged(rerender ? "sell" : ""),
+});
+
+/* What is on screen: preview, estimate and Run send this (never buy_rules: null). */
+function scScreenState() {
+  return {
+    buy_rules: SC.buy,
+    sell_linked: SC.linked,
+    sell_rules: SC.linked ? null : SC.sell,
+    universes: SC.unis.map((u) => u.id).filter((id) => SC.uniSel.has(id)),
+    custom_symbols: SC.custom.slice(),
+    side: $("scSide").value,
+    evaluation: $("scEval").value,
+  };
+}
+
+/* Something on screen changed: mark dirty, re-render if asked, refresh the read-back
+   and the estimate (debounced). */
+function scChanged(rerender) {
+  SC.dirty = true;
+  if (rerender === "buy") SC_BUY.render();
+  if (rerender === "sell") SC_SELL.render();
+  $("scSaveState").textContent = "unsaved changes";
+  scQueuePreview();
+  scQueueEstimate();
+}
+function scQueuePreview() { clearTimeout(SC.previewTimer); SC.previewTimer = setTimeout(scPreview, 350); }
+function scQueueEstimate() { clearTimeout(SC.estTimer); SC.estTimer = setTimeout(scEstimate, 600); }
+
+async function loadScanner() {
+  let d;
+  try { d = await api("/api/scanner"); }
+  catch (e) { $("scTables").innerHTML = '<p class="no2"></p>'; $("scTables").firstChild.textContent = e.message; scAnnounce(e.message); return; }
+  SC.cat = d.catalog;
+  SC.defaults = d.defaults;
+  SC.config = d.config || {};
+  SC.canSave = !!d.can_save;
+  SC.mcxCharts = d.mcx_charts !== false;
+  SC.dataSource = d.data_source || "";
+  SC.unis = d.universes || [];
+  // Leaving the tab and coming back must not throw away edits in progress.
+  if (!SC.dirty) {
+    const c = SC.config;
+    SC.buy = clone(c.buy_rules || []);
+    SC.sell = clone(c.sell_rules || []);
+    SC.linked = c.sell_linked !== false;
+    SC.buyReset = !c.buy_customised;
+    SC.uniSel = new Set(c.universes || []);
+    SC.custom = (c.custom_symbols || []).slice();
+    $("scSide").value = c.side || "both";
+    $("scEval").value = c.evaluation || "auto";
+    // Only the select's default: loading never arms auto-rescan.
+    $("scAuto").value = String(SC.auto && SC.auto.armed ? SC.auto.interval
+                                                        : (c.auto_rescan_minutes || 0));
+    $("scSaveState").textContent = c.buy_customised || !c.sell_linked
+      ? "saved in config.yaml" : "the default conditions (not yet customised)";
+  }
+  SC.loaded = true;
+  $("scLinked").checked = SC.linked;
+  $("scSave").disabled = !SC.canSave;
+  $("scSave").title = SC.canSave ? "" : "Settings can only be saved from this machine";
+  if (!SC.canSave) $("scSaveState").textContent = "Settings can only be saved from this machine";
+  SC_BUY.render();
+  SC_SELL.render();
+  scAutoUI();
+  scRenderUnis();
+  scRenderChips();
+  scRenderBudget(d.budget);
+  scPreview();
+  scEstimate();
+  // Showing the tab (or a reload) re-reads the current scan from the start (since=0).
+  SC.scan = d.scan && d.scan.state ? d.scan : SC.scan;
+  SC.scanId = null;
+  SC.next = 0;
+  SC.results = [];
+  scPoll();
+}
+
+async function scPreview() {
+  if (!SC.loaded) return;
+  const box = $("scRuleText");
+  try {
+    const st = scScreenState();
+    const d = await api("/api/scanner/preview", { method: "POST", body: JSON.stringify({
+      buy_rules: st.buy_rules, sell_linked: st.sell_linked, sell_rules: st.sell_rules }) });
+    if (SC.linked) { SC.sell = clone(d.sell.rules); SC_SELL.render(); }
+    const per = d.per_symbol || {};
+    box.className = "rulebox";
+    box.innerHTML = `<div><strong>BUY when</strong> ${esc(d.buy.text)}</div>
+      <div><strong>SELL when</strong> ${esc(d.sell.text)}${d.sell.linked
+        ? ' <span class="mut">(the mirror of BUY)</span>' : ""}</div>
+      <div class="mut">Data per NSE/BSE symbol: first scan of the day ${esc(per.first_scan_of_day)}
+        requests, then ${esc(per.repeat)} per scan (prior sessions are cached for the day).</div>`;
+  } catch (e) {
+    box.className = "rulebox bad";
+    box.textContent = e.message;
+  }
+}
+
+$("scLinked").onchange = () => {
+  if ($("scLinked").checked) {
+    if (!confirm("Discard the SELL edits and mirror BUY again?")) { $("scLinked").checked = false; return; }
+    SC.linked = true;
+  } else {
+    // Unlinking starts from the current mirror, now editable.
+    SC.linked = false;
+  }
+  scChanged("sell");
+};
+$("scReset").onclick = () => {
+  if (!SC.defaults) return;
+  if (!confirm("Replace the BUY rows with the seven default conditions?")) return;
+  SC.buy = clone(SC.defaults.buy_rules);
+  scChanged("buy");
+  SC.buyReset = true;   // after scChanged: Save sends null until a row is edited
+};
+$("scSave").onclick = async () => {
+  if (!SC.canSave) return;
+  const st = scScreenState();
+  const body = { scanner: {
+    buy_rules: SC.buyReset ? null : st.buy_rules,
+    sell_rules: SC.linked ? null : st.sell_rules,
+    universes: st.universes, custom_symbols: st.custom_symbols,
+    side: st.side, evaluation: st.evaluation,
+    auto_rescan_minutes: Number($("scAuto").value) || 0,
+  } };
+  $("scSave").disabled = true;
+  try {
+    await api("/api/settings/config", { method: "PUT", body: JSON.stringify(body) });
+    note("Scanner settings saved to config.yaml.", "ok");
+    SC.dirty = false;
+    await loadScanner();
+  } catch (e) { note(e.message); }
+  $("scSave").disabled = !SC.canSave;
+};
+
+/* ---- universes and custom symbols ---- */
+function scUniText(u) {
+  const unit = u.id === "mcx" ? "commodities" : "stocks";
+  let where = "";
+  if (u.source === "snapshot") where = "snapshot of " + (u.as_of || "?");
+  else if (u.source === "cache") where = "cache of " + (u.as_of || "?");
+  else if (u.source === "Upstox instrument master") where = "Upstox master of " + (u.as_of || "?");
+  else if (u.source) where = "NSE list of " + (u.as_of || "?");
+  const size = u.size != null ? fmtInt(u.size) + " " + unit
+    : (SC.uniLoading.has(u.id) ? "loading…" : "size loads when ticked");
+  return [u.label, size, where].filter(Boolean).join(" · ");
+}
+function scRenderUnis() {
+  const box = $("scUnis");
+  const focused = document.activeElement && box.contains(document.activeElement)
+    ? document.activeElement.id : "";
+  box.innerHTML = SC.unis.map((u) => `<label class="inline" for="scU-${esc(u.id)}">
+      <input type="checkbox" id="scU-${esc(u.id)}" data-sc-uni="${esc(u.id)}"
+        ${SC.uniSel.has(u.id) ? "checked" : ""} />
+      <span>${esc(scUniText(u))}${u.error ? `<span class="err">${esc(u.error)}</span>` : ""}</span></label>`).join("");
+  box.querySelectorAll("[data-sc-uni]").forEach((el) => {
+    el.onchange = () => {
+      const id = el.dataset.scUni;
+      if (el.checked) SC.uniSel.add(id); else SC.uniSel.delete(id);
+      const u = SC.unis.find((x) => x.id === id);
+      if (el.checked && u && u.size == null && (id === "fno" || id === "mcx")) scLoadUni(id);
+      scRenderTotal();
+      scChanged("");
+    };
+  });
+  if (focused && $(focused)) $(focused).focus();
+  scRenderTotal();
+}
+async function scLoadUni(id) {
+  SC.uniLoading.add(id);
+  scRenderUnis();
+  $("scTotal").textContent = id === "mcx" ? "loading the MCX list…" : "loading the F&O list…";
+  try {
+    const d = await api("/api/scanner/universes?" + new URLSearchParams({ load: id }));
+    SC.unis = d.universes || SC.unis;
+  } catch (e) { note(e.message); }
+  SC.uniLoading.delete(id);
+  scRenderUnis();
+  scQueueEstimate();
+}
+function scRenderTotal() {
+  let total = 0, unknown = [];
+  for (const u of SC.unis) {
+    if (!SC.uniSel.has(u.id)) continue;
+    if (u.size != null) total += Number(u.size) || 0; else unknown.push(u.label);
+  }
+  total += SC.custom.length;
+  const sel = SC.uniSel.size + SC.custom.length;
+  $("scTotal").textContent = !sel ? "Nothing selected: tick a universe or add a symbol."
+    : `About ${fmtInt(total)} symbols` + (unknown.length ? ` plus ${unknown.join(", ")} (size not loaded yet)` : "") +
+      (SC.uniSel.size > 1 || (SC.uniSel.size && SC.custom.length)
+        ? ": an upper bound, overlaps are removed when the scan starts." : ".");
+}
+
+const SC_SYM_RE = /^[A-Z0-9][A-Z0-9&\-_.]{0,29}$/;
+function scParseSymbol(text) {
+  const t = String(text || "").trim().toUpperCase();
+  const m = /^(NSE|BSE|MCX)\s*:\s*(.+)$/.exec(t);
+  // A pasted suggestion label ("RELIANCE — Reliance Industries") counts by its ticker.
+  const exch = m ? m[1] : "NSE", sym = (m ? m[2] : t).split(" — ")[0].trim();
+  return SC_SYM_RE.test(sym) ? exch + ":" + sym : null;
+}
+function scRenderChips() {
+  const ul = $("scChips");
+  ul.innerHTML = SC.custom.map((s, i) => `<li><span>${esc(s)}</span>
+      <button type="button" class="sm" data-sc-chip="${i}" aria-label="Remove ${esc(s)}">✕</button></li>`).join("");
+  ul.querySelectorAll("[data-sc-chip]").forEach((b) => {
+    b.onclick = () => {
+      const i = Number(b.dataset.scChip);
+      SC.custom.splice(i, 1);
+      scRenderChips(); scRenderTotal(); scChanged("");
+      const next = ul.querySelector(`[data-sc-chip="${Math.min(i, SC.custom.length - 1)}"]`);
+      (next || $("scSym")).focus();
+    };
+  });
+}
+function scAddSymbol() {
+  const raw = $("scSym").value;
+  if (!raw.trim()) return;
+  const sym = scParseSymbol(raw);
+  if (!sym) { note(`"${raw.trim()}": use SYMBOL, NSE:SYMBOL, BSE:SYMBOL or MCX:COMMODITY`); return; }
+  if (SC.custom.includes(sym)) { $("scSym").value = ""; return; }
+  if (SC.custom.length >= 200) { note("At most 200 custom symbols."); return; }
+  SC.custom.push(sym);
+  $("scSym").value = "";
+  scRenderChips(); scRenderTotal(); scChanged("");
+}
+$("scSymAdd").onclick = scAddSymbol;
+$("scSym").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); scAddSymbol(); }
+});
+$("scSym").addEventListener("input", () => {
+  clearTimeout(SC.symTimer);
+  SC.symTimer = setTimeout(() => scSuggest($("scSym").value), 200);
+});
+async function scSuggest(text) {
+  const m = /^\s*(NSE|BSE|MCX)\s*:\s*(.*)$/i.exec(text || "");
+  const q = (m ? m[2] : text || "").trim();
+  const exchanges = m ? m[1].toUpperCase() : "NSE,BSE,MCX";
+  if (!q) return;
+  const hint = $("scSymHint");
+  const extra = exchanges !== "NSE" && !SC.extraLoaded;
+  if (extra) hint.textContent = "loading BSE and MCX symbol lists…";
+  try {
+    const d = await api("/api/charts/symbols?" + new URLSearchParams({ q, exchanges, limit: "30" }));
+    if (exchanges !== "NSE") SC.extraLoaded = true;
+    const opts = [];
+    for (const s of d.symbols || []) {
+      const id = String(s.id || "");
+      let mm;
+      if ((mm = /^eq:(NSE|BSE):(.+)$/.exec(id))) opts.push([mm[1] + ":" + mm[2], s.label]);
+      else if ((mm = /^mcx:([^:]+)/.exec(id))) opts.push(["MCX:" + mm[1], s.label]);
+    }
+    $("scSymList").innerHTML = opts.map(([v, l]) =>
+      `<option value="${esc(v)}">${esc(l)}</option>`).join("");
+  } catch (e) { /* suggestions are optional */ }
+  if (extra) hint.textContent = "e.g. RELIANCE, BSE:TCS, MCX:GOLD";
+}
+
+["scSide", "scEval"].forEach((id) => { $(id).onchange = () => scChanged(""); });
+// Auto-rescan: choosing a value never arms it (Run does); Off disarms at once.
+$("scAuto").onchange = () => {
+  SC.dirty = true;
+  $("scSaveState").textContent = "unsaved changes";
+  scAutoChanged();
+};
+
+/* ---- estimate ---- */
+async function scEstimate() {
+  if (!SC.loaded) return;
+  const mine = ++SC.estSeq;
+  const st = scScreenState();
+  const box = $("scEst");
+  box.className = "sub";
+  if (!st.universes.length && !st.custom_symbols.length) {
+    box.textContent = "Select at least one universe or custom symbol.";
+    return;
+  }
+  box.textContent = "Estimating the request cost…";
+  try {
+    const e = await api("/api/scanner/estimate", { method: "POST", body: JSON.stringify(st) });
+    if (mine !== SC.estSeq) return;
+    SC.estimate = e;
+    box.textContent = scEstimateText(e);
+  } catch (err) {
+    if (mine !== SC.estSeq) return;
+    box.className = "sub no2";
+    box.textContent = err.message;
+  }
+}
+function scEstimateText(e) {
+  const r = e.requests || {}, eta = e.eta_seconds || {};
+  const rate = Number(e.rate_per_second) || 6;
+  const cap = Number(SC.config.max_requests_per_30min) || 1500;
+  // "under the N cap" only when the 30-minute cap, not the pace, sets the time.
+  const capped = (reqs, secs) => (Number(secs) > Number(reqs) / rate + 1 ? ` under the ${fmtInt(cap)} cap` : "");
+  if (!e.symbols) return "Nothing to scan. " + (e.warnings || []).join(" ");
+  let s = `${fmtInt(e.symbols)} symbols` +
+    ((e.skipped || []).length ? ` (${fmtInt(e.skipped.length)} skipped)` : "") + ": ";
+  if (e.evaluation === "lazy") {
+    s += `≈ ${fmtInt(r.lazy_typical)} Upstox requests lazy (about ${fmtDur(eta.min)}` +
+      `${capped(r.lazy_typical, eta.min)}); every condition would need ≈ ${fmtInt(r.complete)}` +
+      ` and ≈ ${fmtDur(eta.max)}${capped(r.complete, eta.max)}.`;
+  } else {
+    s += `≈ ${fmtInt(r.complete)} Upstox requests, every condition (about ${fmtDur(eta.max)}` +
+      `${capped(r.complete, eta.max)}).`;
+  }
+  if (Number(r.quotes_per_30s) > 0) s += " + about 1 quote request per 400 symbols every 30 s.";
+  s += ` Repeat scans ≈ ${fmtInt(r.repeat)}. ${fmtInt(e.available)} available now.`;
+  if ((e.warnings || []).length) s += " " + e.warnings.join(" ");
+  return s;
+}
+
+/* ---- run, cancel, polling ---- */
+function scAnnounce(text) { $("scSr").textContent = text; }
+function scRequests(s) {
+  const q = s.requests || {};
+  return (Number(q.upstox) || 0) + (Number(q.dhan) || 0) + (Number(q.other) || 0);
+}
+/* trigger "auto" (with interval_minutes) is for the auto-rescan code; Run sends manual. */
+async function scRun(trigger, interval) {
+  const body = { ...scScreenState(), trigger: trigger === "auto" ? "auto" : "manual" };
+  if (body.trigger === "auto") body.interval_minutes = interval;
+  $("scRun").disabled = true;
+  try {
+    const r = await api("/api/scanner/run", { method: "POST", body: JSON.stringify(body) });
+    const s = r.scan || {};
+    SC.ownJobs.add(s.id);
+    // A new job: its results start at seq 1 (F11).
+    SC.scanId = s.id; SC.next = 0; SC.results = []; SC.scan = s;
+    SC.lastState = s.state; SC.lastDecile = -1; SC.renderKey = "";
+    scAnnounce("Scan started.");
+    scRenderAll();
+    if (body.trigger === "manual") {   // an auto run never moves the focus
+      SC.focusCancel = true;
+      $("scCancel").focus();
+    }
+    scPoll();
+    return r;
+  } catch (e) {
+    $("scProgText").textContent = e.message;
+    note(e.message);
+    scRenderRun();
+    throw e;
+  }
+}
+$("scRun").onclick = async () => {
+  const minutes = Number($("scAuto").value) || 0;
+  if (minutes) {
+    $("scRun").disabled = true;
+    const refusal = await scAutoRefusal(minutes);
+    if (refusal) { $("scAuto").value = "0"; scDisarm(refusal); note(refusal); }
+    else scArm(minutes);
+  } else scDisarm();
+  // The manual run goes ahead either way; nothing chains from a run that was refused.
+  scRun("manual").catch(() => scDisarm());
+};
+$("scCancel").onclick = async () => {
+  scDisarm();
+  try {
+    const r = await api("/api/scanner/cancel", { method: "POST" });
+    if (r.scan && r.scan.id === SC.scanId) SC.scan = r.scan;
+    scRenderRun();
+    scPoll();
+  } catch (e) { note(e.message); }
+};
+
+function scSchedule(ms) { clearTimeout(SC.pollTimer); SC.pollTimer = setTimeout(scPoll, ms); }
+/* One rule: every 1 s while the tab is shown and a scan is active; every 5 s while
+   hidden only if auto-rescan is armed; otherwise paused until the tab is shown again,
+   which reloads with since=0. */
+async function scPoll() {
+  clearTimeout(SC.pollTimer);
+  SC.pollTimer = null;
+  const mine = ++SC.pollSeq;
+  const since = SC.next;
+  let d;
+  try { d = await api("/api/scanner/status?" + new URLSearchParams({ since: String(since) })); }
+  catch (e) {
+    if (mine !== SC.pollSeq) return;
+    $("scProgText").textContent = "Status unavailable: " + e.message;
+    if (scActive() && TAB === "scanner") scSchedule(3000);
+    return;
+  }
+  if (mine !== SC.pollSeq) return;
+  const s = d.scan || { state: "idle" };
+  if (s.id && s.id !== SC.scanId) {
+    // A different job than the one held (a new run here or elsewhere): reset the cursor.
+    SC.scanId = s.id; SC.next = 0; SC.results = []; SC.lastDecile = -1; SC.renderKey = "";
+    if (since > 0) { scPoll(); return; }
+  }
+  if (s.id) {
+    const have = SC.results.length ? SC.results[SC.results.length - 1].seq : 0;
+    for (const r of d.results || []) if (r.seq > have) SC.results.push(r);
+    SC.next = Math.max(SC.next, Number(d.next) || 0);
+  }
+  const was = SC.lastState;
+  SC.scan = s;
+  SC.lastState = s.state;
+  scProgressAnnounce(s, was);
+  if (TAB === "scanner") scRenderAll();
+  if (SC_ACTIVE.includes(s.state)) {
+    if (TAB === "scanner") scSchedule(1000);
+    else if (SC.auto && SC.auto.armed) scSchedule(5000);
+  } else if (SC_ACTIVE.includes(was)) {
+    scFinished(s);
+  }
+}
+function scProgressAnnounce(s, was) {
+  if (s.state === "waiting" && was !== "waiting") {
+    scAnnounce(s.waiting_until ? "Waiting for the Upstox request budget until " + clock(s.waiting_until)
+                               : "Waiting for requests in flight");
+    return;
+  }
+  if (s.state === "running" && s.total) {
+    const dec = Math.floor((s.scanned / s.total) * 10);
+    if (dec > SC.lastDecile && dec > 0 && dec < 10) {
+      scAnnounce(`${dec * 10}% scanned (${s.scanned} of ${s.total})`);
+    }
+    SC.lastDecile = Math.max(SC.lastDecile, dec);
+  }
+}
+/* A scan this page saw running has ended. (Auto-rescan scheduling hooks in here.) */
+function scFinished(s) {
+  const m = s.matches || {};
+  const parts = (s.sides || []).map((side) => `${m[side] || 0} ${side}`);
+  if (s.state === "done") {
+    scAnnounce(`Scan finished: ${parts.join(", ")} matches of ${s.scanned}`);
+  } else {
+    scAnnounce(`Scan ${s.state}` + (s.message ? ": " + s.message : "") + ` (${s.scanned} of ${s.total} scanned)`);
+  }
+  if (SC.focusCancel) {
+    SC.focusCancel = false;
+    const a = document.activeElement;
+    if (TAB === "scanner" && (!a || a === document.body || a === $("scCancel"))) $("scRun").focus();
+  }
+  scAutoFinished(s);
+  scRefreshBudget();
+}
+
+/* ---- auto-rescan (one rule): loading never arms it; Run arms it after the budget
+   check; only this page's own jobs schedule the next run. ---- */
+async function scAutoRefusal(minutes) {
+  if (!SC.estimate) await scEstimate();
+  const e = SC.estimate;
+  if (!e || !e.requests) return "";   // no estimate to check: the server's own check decides
+  const cap = Number(SC.config.max_requests_per_30min) || 1500;
+  const per30 = (Number(e.requests.repeat) || 0) * 30 / minutes;
+  if (per30 <= cap) return "";
+  return `Auto-rescan off: every ${minutes} min over ${fmtInt(e.symbols)} symbols needs ≈${fmtInt(Math.round(per30))}` +
+    ` requests per 30 min; the scanner may use ${fmtInt(cap)}.`;
+}
+function scArm(minutes) {
+  if (SC.auto) clearTimeout(SC.auto.timer);   // the end of this Run's job schedules the next
+  SC.auto = { interval: minutes, armed: true, timer: null, failures: 0 };
+  scAutoUI();
+}
+function scDisarm(reason) {
+  if (SC.auto) clearTimeout(SC.auto.timer);
+  const was = !!(SC.auto && SC.auto.armed);
+  SC.auto = null;
+  scAutoUI(reason);
+  if (was) scAnnounce("Auto-rescan off" + (reason ? ": " + reason : ""));
+}
+function scAutoUI(reason) {
+  const tab = $("tab-scanner"), hint = $("scAutoHint");
+  const armed = !!(SC.auto && SC.auto.armed);
+  tab.textContent = armed ? "Scanner · auto" : "Scanner";
+  if (armed) tab.setAttribute("aria-label", `Scanner, auto-rescan every ${SC.auto.interval} minutes`);
+  else tab.removeAttribute("aria-label");
+  const minutes = Number($("scAuto").value) || 0;
+  let text = "";
+  if (reason) text = reason;
+  else if (armed) text = `On: the next scan starts ${SC.auto.interval} min after this one ends.`;
+  else if (minutes) text = "starts after the next Run";
+  hint.textContent = text;
+  hint.hidden = !text;
+}
+async function scAutoChanged() {
+  const minutes = Number($("scAuto").value) || 0;
+  if (!minutes) { scDisarm(); return; }
+  if (!(SC.auto && SC.auto.armed)) { scAutoUI(); return; }
+  const refusal = await scAutoRefusal(minutes);
+  if (!(SC.auto && SC.auto.armed)) return;
+  if (refusal) { $("scAuto").value = "0"; scDisarm(refusal); note(refusal); return; }
+  SC.auto.interval = minutes;   // applies from the next scheduling
+  scAutoUI();
+}
+function scAutoSchedule() {
+  if (!(SC.auto && SC.auto.armed)) return;
+  clearTimeout(SC.auto.timer);
+  SC.auto.timer = setTimeout(scAutoFire, SC.auto.interval * 60000);
+}
+function scAutoFinished(s) {
+  if (!(SC.auto && SC.auto.armed) || !SC.ownJobs.has(s.id)) return;
+  if (s.state === "cancelled") scDisarm();
+  else if (["done", "stopped", "failed"].includes(s.state)) scAutoSchedule();
+}
+async function scAutoFire() {
+  const a = SC.auto;
+  if (!(a && a.armed)) return;
+  a.timer = null;
+  try {
+    await scRun("auto", a.interval);
+    a.failures = 0;
+  } catch (e) {
+    if (SC.auto !== a || !a.armed) return;
+    const st = e.status;
+    if (st === 429 || st === 409) {            // skipped: stays armed, tries again later
+      a.failures = 0;
+      if (st === 409) note("skipped: a scan is running");
+      scAutoSchedule();
+    } else if (!st) {                          // network error: retry, 3 in a row disarm
+      a.failures += 1;
+      if (a.failures >= 3) scDisarm("Auto-rescan off after 3 failed attempts: " + e.message);
+      else scAutoSchedule();
+    } else {                                   // 400, 401, 502, …: show it and disarm
+      const v = $("scAuto").value;
+      scDisarm();
+      $("scAuto").value = v;                   // the select keeps its value
+      scAutoUI();
+      note(e.message);
+    }
+  }
+}
+window.addEventListener("pagehide", () => scDisarm());
+async function scRefreshBudget() {
+  try { scRenderBudget((await api("/api/scanner")).budget); } catch (e) { /* optional */ }
+}
+
+/* ---- rendering ---- */
+function scRenderBudget(b) {
+  if (!b) return;
+  const caps = b.caps || {};
+  $("scBudget").textContent = `Upstox: ${fmtInt(b.used_total_30m)} of 2,000 requests used in the ` +
+    `last 30 min (scanner ${fmtInt(b.used_scanner_30m)} of ${fmtInt(caps.scanner_30m)})`;
+}
+function scProgText(s) {
+  const m = s.matches || {};
+  const counts = `${fmtInt(s.scanned)} / ${fmtInt(s.total)} scanned` +
+    (s.sides || []).map((side) => ` · ${side} ${m[side] || 0}`).join("") +
+    ` · ${fmtInt(scRequests(s))} requests`;
+  switch (s.state) {
+    case "idle": return s.other ? String(s.other.message || "") : "No scan yet.";
+    case "loading": return "Loading the symbol lists…";
+    case "waiting":
+      return s.waiting_until ? `Waiting for the Upstox request budget until ${clock(s.waiting_until)} · ${counts}`
+                             : `Waiting for requests in flight · ${counts}`;
+    case "running": return counts + (s.eta_seconds != null ? ` · ETA ${fmtMS(s.eta_seconds)}` : "");
+    case "cancelling": return "Cancelling… · " + counts;
+    case "done": return "Done · " + counts;
+    default:
+      return `${s.state.charAt(0).toUpperCase()}${s.state.slice(1)}${s.message ? ": " + s.message : ""} · ${counts}`;
+  }
+}
+function scRenderRun() {
+  const s = SC.scan || { state: "idle" };
+  const active = scActive();
+  $("scRun").disabled = active;
+  $("scCancel").disabled = !active || s.state === "cancelling";
+  const prog = $("scProg");
+  if (active && (s.state === "loading" || !s.total)) prog.removeAttribute("value");
+  else {
+    prog.max = Math.max(1, Number(s.total) || 1);
+    prog.value = s.total ? Number(s.scanned) || 0 : (s.state === "idle" ? 0 : prog.max);
+  }
+  $("scProgText").textContent = scProgText(s);
+  if (s.budget) scRenderBudget(s.budget);
+}
+function scRenderAll() { scRenderRun(); scRenderResults(); }
+
+const SC_ICON = { true: ["✓", "met", "yes"], false: ["✗", "not met", "no2"],
+                  unavailable: ["n/a", "n/a", "mut"], skipped: ["·", "not checked", "mut"] };
+function scCondCell(c, col) {
+  const [ic, word, cls] = SC_ICON[c.state] || SC_ICON.unavailable;
+  // "Price > ST(21, 0.618)": the price is in the LTP column, so show the indicator's value.
+  const priceLeft = col && /^\S+ (Price|Close|Open|High|Low) /.test(col.label || "") && c.right != null;
+  const v = priceLeft ? c.right : c.left;
+  const val = (c.state === "true" || c.state === "false") && v != null ? " " + n(v) : "";
+  const tip = [c.detail, c.bars ? c.bars + " bars" : "", c.short_history ? "short history" : ""]
+    .filter(Boolean).join(" · ");
+  return `<td class="${cls}" title="${esc(tip)}"><span aria-hidden="true">${ic}</span><span class="sr">${word}</span>${esc(val)}</td>`;
+}
+function scSortValue(r, side, key) {
+  if (key === "symbol") return String(r.symbol || "");
+  if (key === "ltp") return r.ltp;
+  if (key === "chg") return r.change_pct;
+  const sr = (r.sides || {})[side];
+  return sr ? sr.met : null;
+}
+function scSorted(rows, side) {
+  const st = SC.sort[side] || { key: "met", dir: -1 };
+  return rows.slice().sort((a, b) => {
+    const va = scSortValue(a, side, st.key), vb = scSortValue(b, side, st.key);
+    let c = 0;
+    if (va == null && vb != null) return 1;
+    if (vb == null && va != null) return -1;
+    if (va != null && vb != null) c = (typeof va === "string" ? va.localeCompare(vb) : va - vb) * st.dir;
+    return c || String(a.symbol || "").localeCompare(String(b.symbol || ""));
+  });
+}
+function scShortestTf() {
+  const s = SC.scan || {};
+  let best = null;
+  for (const cols of Object.values(s.columns || {})) {
+    for (const c of cols) {
+      const t = TFS.find((x) => x.id === c.tf);
+      if (t && t.minutes < 1440 && (!best || t.minutes < best.minutes)) best = t;
+    }
+  }
+  return best ? best.id : "5m";
+}
+function scActions(r, side) {
+  const label = esc(r.exchange) + ":" + esc(r.symbol);
+  if (!r.chartable) {
+    return `<span aria-hidden="true" title="not chartable here: listed by ISIN only">—</span><span class="sr">not chartable here: listed by ISIN only</span>`;
+  }
+  const out = [];
+  if (r.chart && (r.exchange !== "MCX" || SC.mcxCharts)) {
+    out.push(`<button type="button" class="sm" data-sc-chart="${esc(r.chart)}"
+      data-sc-f="chart:${side}:${esc(r.seq)}" aria-label="Chart ${label}">Chart</button>`);
+  }
+  if (r.tradable) {
+    const bse = r.exchange === "BSE";
+    out.push(`<button type="button" class="sm" data-sc-watch="${esc(r.seq)}" data-sc-side="${side}"
+      data-sc-f="watch:${side}:${esc(r.seq)}" aria-label="Watch ${label}"
+      ${bse ? 'aria-describedby="scBseNote" title="Opens the add-watch form. With Upstox market data, BSE watches do not get candles yet (see README)"'
+            : 'title="Opens the add-watch form, filled in; nothing is created until you press Watch there"'}>Watch</button>`);
+  }
+  return out.length ? out.join(" ")
+    : `<span aria-hidden="true" title="charts of MCX need the Upstox data provider">—</span><span class="sr">no action</span>`;
+}
+function scTable(side, s, filter, minMet) {
+  const cols = (s.columns || {})[side] || [];
+  const rows = SC.results.filter((r) => {
+    const sr = (r.sides || {})[side];
+    if (filter === "all") return true;
+    if (!sr) return false;
+    return filter === "match" ? sr.signal : sr.met >= minMet;
+  });
+  const sorted = scSorted(rows, side);
+  const shown = sorted.slice(0, 1000);
+  const st = SC.sort[side];
+  const sortTh = (key, text, cls) => {
+    const on = st.key === key;
+    return `<th scope="col" class="${cls || ""}" aria-sort="${on ? (st.dir > 0 ? "ascending" : "descending") : "none"}">
+      <button type="button" class="sortb" data-sc-sort="${side}:${key}" data-sc-f="sort:${side}:${key}">${text}${on ? (st.dir > 0 ? " ▲" : " ▼") : ""}</button></th>`;
+  };
+  const matches = (s.matches || {})[side] || 0;
+  const head = sortTh("symbol", "Symbol", "l") + '<th scope="col" class="l">Exch</th>' +
+    sortTh("ltp", "LTP") + sortTh("chg", "Chg %") +
+    cols.map((c) => `<th scope="col" title="${esc(c.text)}">${esc(c.label)}</th>`).join("") +
+    sortTh("met", "Met") + '<th scope="col">Signal</th><th scope="col" class="l">Actions</th>';
+  const body = shown.map((r) => {
+    const sr = (r.sides || {})[side];
+    const tip = [r.name, ...(r.notes || [])].filter(Boolean).join(" · ");
+    const chg = r.change_pct == null ? "—"
+      : `<span class="${r.change_pct > 0 ? "up" : r.change_pct < 0 ? "down" : "mut"}">${r.change_pct > 0 ? "+" : ""}${n(r.change_pct)}</span>`;
+    const conds = sr ? sr.rows.map((cell, i) => scCondCell(cell, cols[i])).join("")
+      : `<td class="l no2" colspan="${Math.max(1, cols.length)}" title="${esc(r.error)}">${esc(r.error ? "error: " + String(r.error).slice(0, 90) : r.status)}</td>`;
+    const notChecked = sr ? sr.total - sr.checked : 0;
+    const met = sr ? `${esc(sr.met)}/${esc(sr.total)}${notChecked > 0 ? ` <span class="mut">(${notChecked} not checked)</span>` : ""}` : "—";
+    const signal = sr && sr.signal ? `<span class="yes">${side}</span>` : '<span class="mut">no</span>';
+    return `<tr class="${sr && sr.signal ? "ready" : ""}">
+      <th scope="row" class="l" title="${esc(tip)}">${esc(r.symbol)}</th>
+      <td class="l">${esc(r.exchange)}</td><td>${n(r.ltp)}</td><td>${chg}</td>${conds}
+      <td>${met}</td><td>${signal}</td><td class="l">${scActions(r, side)}</td></tr>`;
+  }).join("");
+  const colspan = 7 + cols.length;
+  const more = sorted.length > shown.length
+    ? `<tr><td colspan="${colspan}" class="l mut">Showing the first 1,000 of ${fmtInt(sorted.length)} rows.</td></tr>` : "";
+  return `<div class="scroll"><table class="scres">
+    <caption>${side}: ${fmtInt(matches)} matches of ${fmtInt(s.scanned)} scanned</caption>
+    <thead><tr>${head}</tr></thead>
+    <tbody>${body || `<tr><td colspan="${colspan}" class="l mut">${s.scanned ? "No rows match this filter." : "No results yet."}</td></tr>`}${more}</tbody>
+  </table></div>`;
+}
+function scRenderResults() {
+  const s = SC.scan;
+  const box = $("scTables");
+  if (!s || !s.id) {
+    box.innerHTML = '<p class="mut">Run a scan to see results.</p>';
+    $("scFooter").textContent = "";
+    $("scNotes").innerHTML = "";
+    SC.renderKey = "";
+    return;
+  }
+  const filter = $("scFilter").value, minMet = Number($("scMinMet").value) || 0;
+  const key = [s.id, s.state, SC.results.length, filter, minMet, SC.mcxCharts,
+               JSON.stringify(SC.sort)].join("|");
+  if (key !== SC.renderKey) {
+    SC.renderKey = key;
+    const focused = document.activeElement && box.contains(document.activeElement)
+      ? document.activeElement.dataset.scF : "";
+    box.innerHTML = (s.sides || []).filter((x) => x === "BUY" || x === "SELL")
+      .map((side) => scTable(side, s, filter, minMet)).join("")
+      || '<p class="mut">No side selected.</p>';
+    box.querySelectorAll("[data-sc-sort]").forEach((b) => {
+      b.onclick = () => {
+        const [side, k] = b.dataset.scSort.split(":");
+        const st = SC.sort[side];
+        if (st.key === k) st.dir = -st.dir; else { st.key = k; st.dir = k === "symbol" ? 1 : -1; }
+        scRenderResults();
+      };
+    });
+    box.querySelectorAll("[data-sc-chart]").forEach((b) => {
+      b.onclick = () => openCharts([b.dataset.scChart], scShortestTf());
+    });
+    box.querySelectorAll("[data-sc-watch]").forEach((b) => {
+      b.onclick = () => {
+        const r = SC.results.find((x) => String(x.seq) === b.dataset.scWatch);
+        if (r) prefillWatch(r.symbol, r.exchange, b.dataset.scSide === "SELL" ? "SHORT" : "LONG");
+      };
+    });
+    if (focused) {
+      const el = box.querySelector(`[data-sc-f="${focused}"]`);
+      if (el) el.focus();
+    }
+  }
+  scRenderFooter(s);
+}
+function scRenderFooter(s) {
+  const dur = Math.round(Number(s.duration_seconds) || 0);
+  const est = s.estimate || {};
+  let evalText = s.evaluation_used || s.evaluation || "";
+  if (s.evaluation_used === "lazy" && est.requests) {
+    evalText = `lazy (complete would need ≈${fmtInt(est.requests.complete)}; ${fmtInt(est.available)} available)`;
+  }
+  $("scFooter").textContent = [
+    `Last run ${clock(s.finished_at || s.started_at)}`, `${fmtInt(s.scanned)} scanned`,
+    `${fmtInt(s.errors)} errors`, `${fmtInt(s.na_symbols)} with n/a`,
+    `${fmtInt(scRequests(s))} requests`, `${Math.floor(dur / 60)} m ${dur % 60} s`, evalText,
+  ].filter(Boolean).join(" · ");
+  const notes = (s.notes || []).slice();
+  if (s.message) notes.unshift(s.message);
+  if (s.synthetic) notes.push("Synthetic data: these are not real market prices.");
+  const skipped = s.skipped || [];
+  if (skipped.length) {
+    notes.push(`${skipped.length} symbols skipped: ` + skipped.slice(0, 5)
+      .map((x) => `${x.symbol} (${x.reason})`).join("; ") + (skipped.length > 5 ? "; …" : ""));
+  }
+  $("scNotes").innerHTML = notes.map((t) => `<li>${esc(t)}</li>`).join("");
+}
+$("scFilter").onchange = () => {
+  $("scMinWrap").hidden = $("scFilter").value !== "atleast";
+  scRenderResults();
+};
+$("scMinMet").oninput = () => scRenderResults();
+
+/* Fill the Trade tab's add-watch form; nothing is created until Watch is pressed there. */
+function prefillWatch(symbol, exchange, dir) {
+  $("sym").value = symbol;
+  $("exch").value = exchange === "BSE" ? "BSE" : "NSE";
+  $("dir").value = dir;
+  showTab("trade");
+  $("qty").focus();
 }
 
 /* ---------------------------------------------------------------- refresh */

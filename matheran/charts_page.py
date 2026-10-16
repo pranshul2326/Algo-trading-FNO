@@ -693,7 +693,7 @@ function rememberMeta(id, meta) {
 function resolveTyped(raw, strict) {
   const text = (raw || "").trim();
   if (!text) return null;
-  const m = /^(eq|idx|opt|fut|basket):(.+)$/i.exec(text);
+  const m = /^(eq|idx|opt|fut|mcx|basket):(.+)$/i.exec(text);
   if (m) {
     const kind = m[1].toLowerCase();
     return kind + ":" + (kind === "basket" ? m[2] : m[2].toUpperCase());
@@ -1031,6 +1031,9 @@ function updateTradeButton(pane) {
   let why = "";
   if (sym.startsWith("idx:")) why = "An index spot cannot be traded; chart its future or an option";
   else if (sym.startsWith("basket:")) why = "Baskets are executed from the console's Baskets tab";
+  else if (sym.startsWith("mcx:")) {
+    why = "MCX commodities can be charted but not traded here: the engine trades NSE/BSE equities and NSE/BSE F&O";
+  }
   else if (STATUS && STATUS.risk && STATUS.risk.allow_manual_buy === false) {
     why = "Manual orders are switched off on the Strategy tab";
   }

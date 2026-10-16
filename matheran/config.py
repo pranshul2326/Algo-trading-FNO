@@ -106,6 +106,23 @@ class OptionsConfig:
 
 
 @dataclass(slots=True)
+class ScannerConfig:
+    """The live BUY/SELL scanner (scanner.py). Rows are exit-rule rows plus `tf`."""
+
+    buy_rules: list | None = None          # null = the seven default rows (scanner.DEFAULT_BUY_ROWS)
+    sell_rules: list | None = None         # null = mirror of buy_rules ("linked")
+    universes: list = field(default_factory=lambda: ["nifty50"])
+    custom_symbols: list = field(default_factory=list)    # "NSE:RELIANCE", "BSE:TCS", "MCX:GOLD"
+    side: str = "both"                     # both | buy | sell
+    evaluation: str = "auto"               # auto | complete | lazy
+    auto_rescan_minutes: int = 0           # 0 = off; 2 5 10 15 30 60. Only the console select's
+                                           # default: loading never arms it
+    max_requests_per_30min: int = 1500     # the scanner's own share of Upstox's 2,000 / 30 min
+    requests_per_second: float = 6.0
+    concurrency: int = 6
+
+
+@dataclass(slots=True)
 class BrokerConfig:
     name: str = "dhan"
     # Optional separate market-data provider. "upstox" serves candles free and
@@ -149,6 +166,7 @@ class Config:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     options: OptionsConfig = field(default_factory=OptionsConfig)
+    scanner: ScannerConfig = field(default_factory=ScannerConfig)
     # Read from the environment even when a Config is built directly, otherwise a
     # programmatically created app would silently come up with no API key set.
     secrets: Secrets = field(default_factory=Secrets.from_env)
@@ -206,6 +224,7 @@ def load_config(path: str | Path | None = None, *, load_env: bool = True) -> Con
         strategy=_section(raw, "strategy", StrategyConfig),
         risk=_section(raw, "risk", RiskConfig),
         options=_section(raw, "options", OptionsConfig),
+        scanner=_section(raw, "scanner", ScannerConfig),
         secrets=Secrets.from_env(),
     )
     validate(cfg)
@@ -285,6 +304,9 @@ def validate(cfg: Config) -> None:
         raise ValueError("broker.data_broker must be upstox, dhan, synthetic or empty")
     if cfg.options.otm_count < 0 or cfg.options.otm_count > 20:
         raise ValueError("options.otm_count must be between 0 and 20")
+    from .scanner import validate_config
+
+    validate_config(cfg.scanner)
 
 
 def with_overrides(cfg: Config, **overrides) -> Config:

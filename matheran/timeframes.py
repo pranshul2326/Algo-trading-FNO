@@ -133,6 +133,10 @@ def _merge(*parts: CandleSeries) -> CandleSeries:
     return CandleSeries([by_ts[ts] for ts in sorted(by_ts)])
 
 
+# Public name for other modules (the scanner merges history with today's bars).
+merge_series = _merge
+
+
 async def load_series(
     broker,
     instrument,

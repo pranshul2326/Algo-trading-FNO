@@ -9,6 +9,7 @@ candles free and without any credentials.
 from __future__ import annotations
 
 import logging
+from typing import Iterator
 
 from ..config import Config
 from .base import Broker, BrokerError, BrokerPosition, OrderState, PlacedOrder
@@ -32,7 +33,50 @@ __all__ = [
     "StoxkartBroker",
     "UpstoxData",
     "build_broker",
+    "broker_nodes",
+    "find_upstox",
+    "data_node",
 ]
+
+
+def broker_nodes(root) -> Iterator[Broker]:
+    """Walk the broker graph; wrappers nest several levels deep.
+
+    A LIFO stack: the root first, then the .data_broker subtree, then .execution,
+    then .data, skipping None and repeats. data_source._equity_index() relies on this
+    order (Dhan's equities before Upstox's in a composite), so it must not change.
+    """
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        yield node
+        for attr in ("data", "execution", "data_broker"):
+            stack.append(getattr(node, attr, None))
+
+
+def find_upstox(root) -> UpstoxData | None:
+    """The first UpstoxData in the broker graph, if any."""
+    for node in broker_nodes(root):
+        if isinstance(node, UpstoxData):
+            return node
+    return None
+
+
+def data_node(root) -> Broker:
+    """The node that serves root's candles: follow PaperBroker.data_broker and
+    CompositeBroker.data while they are set. A PaperBroker without a data broker is
+    its own (synthetic) source, and a bare DhanBroker (live mode without a data
+    broker) is its own node."""
+    node = root
+    while True:
+        nxt = getattr(node, "data_broker", None) or getattr(node, "data", None)
+        if not isinstance(nxt, Broker):
+            return node
+        node = nxt
 
 
 def _build_execution(name: str, cfg: Config) -> Broker:

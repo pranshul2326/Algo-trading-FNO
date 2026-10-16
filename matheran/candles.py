@@ -5,7 +5,7 @@ from __future__ import annotations
 import calendar
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -250,30 +250,43 @@ def _last_weekday_of_month(day: date) -> date:
     return last
 
 
-def bar_end(ts: datetime, minutes: int, segment: str = "NSE_EQ") -> datetime:
+def bar_end(
+    ts: datetime, minutes: int, segment: str = "NSE_EQ", close_time: time | None = None
+) -> datetime:
     """When the bar that starts at `ts` closes.
 
     An intraday bar closes after `minutes`, or at the session close if that comes
     first (the 15:15 two-hour bar closes at 15:30). A day bar closes at its session
     close, a week bar at Friday's and a month bar at its last weekday's. Exchange
-    holidays are not modelled.
+    holidays are not modelled. `close_time`, when given, replaces the segment's
+    session close (MCX closes at 23:30 or 23:55 depending on US daylight saving).
     """
+
+    def closes(d: date) -> datetime:
+        if close_time is None:
+            return session_close(segment, d)
+        return datetime.combine(d, close_time, tzinfo=IST)
+
     day = ts.date()
     if minutes >= MONTH:
-        return session_close(segment, _last_weekday_of_month(day))
+        return closes(_last_weekday_of_month(day))
     if minutes >= WEEK:
-        return session_close(segment, day + timedelta(days=4 - day.weekday()))
+        return closes(day + timedelta(days=4 - day.weekday()))
     if minutes >= DAY:
-        return session_close(segment, day)
+        return closes(day)
     end = ts + timedelta(minutes=minutes)
-    close = session_close(segment, day)
+    close = closes(day)
     # Only clipped when the bar really sits inside the session; data stamped outside
     # it (a feed that runs late) keeps its nominal length.
     return close if ts < close < end else end
 
 
 def drop_forming(
-    series: CandleSeries, minutes: int, now: datetime, segment: str = "NSE_EQ"
+    series: CandleSeries,
+    minutes: int,
+    now: datetime,
+    segment: str = "NSE_EQ",
+    close_time: time | None = None,
 ) -> tuple[CandleSeries, Candle | None]:
     """Split off the candle that is still being built.
 
@@ -283,6 +296,6 @@ def drop_forming(
     if not series:
         return series, None
     last = series.candles[-1]
-    if bar_end(last.ts, minutes, segment) > now:
+    if bar_end(last.ts, minutes, segment, close_time) > now:
         return CandleSeries(series.candles[:-1]), last
     return series, None

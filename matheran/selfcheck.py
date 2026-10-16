@@ -29,7 +29,7 @@ from .indicators import (
 )
 from .models import round_to_tick
 from .strategy import Indicators, evaluate_entry, evaluate_exit
-from .timeutil import session_close, session_open
+from .timeutil import previous_trading_day, session_close, session_open
 
 
 # ----------------------------------------------------------------- references
@@ -390,7 +390,416 @@ def run_checks() -> list[tuple[str, bool, str]]:
     )
 
     results.extend(_chart_and_timeframe_checks(c, h, l))
+    results.extend(_scanner_checks())
     return results
+
+
+def _trend_bars(start, minutes: int, count: int, price: float, sign: float, steps, segment: str):
+    """`count` bars of `minutes` from `start`, moving by `steps` (cycled) times sign, with
+    2-unit wicks; bars of a session only (they restart at each session open)."""
+    out: list[Candle] = []
+    t = start
+    k = 0
+    while len(out) < count:
+        if (t.weekday() >= 5 or t >= session_close(segment, t.date())
+                or t < session_open(segment, t.date())):
+            d = t.date() + timedelta(days=1)
+            while d.weekday() >= 5:
+                d += timedelta(days=1)
+            t = session_open(segment, d)
+            continue
+        o = price
+        cl = price + sign * steps[k % len(steps)]
+        out.append(Candle(ts=t, open=o, high=max(o, cl) + 2.0, low=min(o, cl) - 2.0, close=cl,
+                          volume=1000.0))
+        price = cl
+        k += 1
+        t += timedelta(minutes=minutes)
+    return out, price
+
+
+def _days(start, count: int, price: float, sign: float, steps, segment: str = "NSE_EQ"):
+    out: list[Candle] = []
+    d = start
+    k = 0
+    while len(out) < count:
+        if d.weekday() < 5:
+            o = price
+            cl = price + sign * steps[k % len(steps)]
+            out.append(Candle(ts=session_open(segment, d), open=o, high=max(o, cl) + 2.0,
+                              low=min(o, cl) - 2.0, close=cl, volume=1e5))
+            price = cl
+            k += 1
+        d += timedelta(days=1)
+    return out, price
+
+
+def _scanner_checks() -> list[tuple[str, bool, str]]:
+    """The scanner: rows, mirroring, sessions, evaluation, cache reuse and the budget."""
+    import asyncio
+    import math
+    from datetime import date, datetime, time as dtime
+    from pathlib import Path
+
+    import yaml
+
+    from . import rules, scanner
+    from .brokers.base import BrokerError
+    from .brokers.upstox import REQUEST_COUNTER, months_back, request_pieces
+    from .models import Instrument
+    from .ratelimit import RequestLedger
+    from .scan_data import (Budget, ScanCancelled, ScanFeed, Target, all_day, available_now,
+                            entry_usable, eta_seconds)
+    from .timeutil import IST, mcx_close_time
+
+    results: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        results.append((name, bool(ok), detail))
+
+    def guard(name: str, fn) -> None:
+        try:
+            ok, detail = fn()
+        except Exception as exc:  # noqa: BLE001 - a crash is a failed check, not a crash
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        check(name, ok, detail)
+
+    # 1. config.example.yaml rows: quoted 'on', the defaults; a bare on: is honoured
+    def c1():
+        path = Path(__file__).resolve().parent.parent / "config.example.yaml"
+        bare = yaml.safe_load("- {tf: 1W, left: {ind: rsi, period: 14}, op: at_or_above, "
+                              "right: {ind: value, value: 50}, on: close}")
+        ok_bare = scanner.normalize_side_rows(bare, "BUY")[0]["on"] == "close"
+        if not path.exists():
+            return ok_bare, "config.example.yaml not found next to the package: file part skipped"
+        raw = yaml.safe_load(path.read_text())["scanner"]["buy_rules"]
+        keys_ok = all("on" in r and True not in r for r in raw)
+        same = scanner.normalize_side_rows(raw, "BUY") == scanner.DEFAULT_BUY_ROWS
+        return keys_ok and same and ok_bare, f"{len(raw)} rows"
+    guard("scanner: config.example.yaml BUY rows are the defaults, 'on' quoted", c1)
+
+    # 2. the SELL mirror
+    def c2():
+        sell = rules.mirror_rules(scanner.DEFAULT_BUY_ROWS)
+        ops = [r["op"] for r in sell]
+        rights = [r["right"]["ind"] for r in sell]
+        ok = (ops == ["at_or_below", "at_or_below", "below", "below", "below", "below", "at_or_below"]
+              and sell[0]["right"]["value"] == 50
+              and rights == ["value", "ema", "supertrend", "supertrend", "supertrend", "vwap", "rsi_ema"]
+              and [r["tf"] for r in sell] == ["1W", "1D", "1D", "2h", "5m", "15m", "15m"])
+        return ok, " ".join(ops)
+    guard("scanner: SELL rows mirror the BUY rows", c2)
+
+    # 3. exit-rule normalisation unchanged
+    def c3():
+        legacy = [{"left": {"ind": "rsi", "period": 21}, "op": "crosses_below",
+                   "right": {"ind": "rsi_ema", "rsi": 21, "period": 9}, "on": "close"},
+                  {"join": "OR", "left": {"ind": "close"}, "op": "below",
+                   "right": {"ind": "supertrend", "period": 21, "factor": 0.618}, "on": "close"}]
+        out = rules.normalize_rules(legacy)
+        stray = rules.normalize_rules([{"tf": "5m", "left": {"ind": "close"}, "op": "above",
+                                        "right": {"ind": "vwap"}}])
+        try:
+            rules.normalize_rules(legacy[:1] * 13)
+            msg = ""
+        except ValueError as exc:
+            msg = str(exc)
+        ok = (len(out) == 2 and all("tf" not in r for r in out + stray)
+              and msg == "at most 12 exit conditions, got 13")
+        return ok, msg
+    guard("scanner: exit-rule normalisation unchanged (no tf, 12-row limit)", c3)
+
+    # 4. bad timeframes
+    def c4():
+        msgs = []
+        for bad in ("7m", 5):
+            row = [{"tf": bad, "left": {"ind": "close"}, "op": "above", "right": {"ind": "vwap"}}]
+            try:
+                scanner.normalize_side_rows(row, "BUY")
+                msgs.append("")
+            except ValueError as exc:
+                msgs.append(str(exc))
+        return all("1m" in m and "1M" in m for m in msgs), " | ".join(msgs)[:120]
+    guard("scanner: tf '7m' and 5 are rejected naming the timeframes", c4)
+
+    # 5. NSE 2h bars
+    def c5():
+        day = _days_series(date(2026, 10, 14), 1)
+        two = resample(day, 120, "NSE_EQ")
+        starts = [x.ts.strftime("%H:%M") for x in two.candles]
+        end = bar_end(two.candles[-1].ts, 120, "NSE_EQ")
+        return starts == ["09:15", "11:15", "13:15", "15:15"] and end.strftime("%H:%M") == "15:30", \
+            ", ".join(starts)
+    guard("scanner: NSE 2h bars 09:15 11:15 13:15 15:15, the last closing 15:30", c5)
+
+    # 6. MCX 2h bars and the close_time keyword
+    def c6():
+        d = date(2026, 12, 9)
+        bars, _ = _trend_bars(session_open("MCX_COMM", d), 1, 870, 5000.0, 1.0, (1.0, -0.5), "MCX_COMM")
+        two = resample(CandleSeries(bars), 120, "MCX_COMM")
+        starts = [x.ts.strftime("%H:%M") for x in two.candles]
+        at = datetime.combine(d, dtime(23, 40), tzinfo=IST)
+        _c, forming = drop_forming(two, 120, at, "MCX_COMM", close_time=dtime(23, 55))
+        _c2, forming2 = drop_forming(two, 120, at, "MCX_COMM")
+        ok = (starts == ["09:00", "11:00", "13:00", "15:00", "17:00", "19:00", "21:00", "23:00"]
+              and forming is not None and forming.ts.strftime("%H:%M") == "23:00" and forming2 is None)
+        return ok, ", ".join(starts)
+    guard("scanner: MCX 2h bars from 09:00; close_time=23:55 keeps 23:00 forming", c6)
+
+    # 7. VWAP resets at the session open (NSE 09:15, MCX 09:00)
+    def c7():
+        ok = True
+        for seg in ("NSE_EQ", "MCX_COMM"):
+            bars, _ = _trend_bars(session_open(seg, date(2026, 10, 13)), 15, 120, 900.0, 1.0,
+                                  (3.0, -1.0), seg)
+            s = CandleSeries(bars)
+            vw = rules.SeriesCalc(s).values({"ind": "vwap"})
+            i = next(k for k, x in enumerate(s.candles) if x.ts.date() != s.candles[0].ts.date())
+            first = s.candles[i]
+            ok &= first.ts.time() == session_open(seg, first.ts.date()).time()
+            ok &= abs(vw[i] - (first.high + first.low + first.close) / 3) < 1e-9
+        return ok, ""
+    guard("scanner: VWAP resets at the NSE 09:15 and MCX 09:00 session open", c7)
+
+    # 8. uptrend: all 7 BUY rows true, SELL false; the downtrend the reverse
+    today = date(2026, 10, 14)
+    now = datetime.combine(today, dtime(11, 0), tzinfo=IST)
+    sides = {"BUY": scanner.DEFAULT_BUY_ROWS, "SELL": rules.mirror_rules(scanner.DEFAULT_BUY_ROWS)}
+    plan = scanner.build_plan(sides, "NSE_EQ", today)
+    inst = Instrument(security_id="1", symbol="TEST", segment="NSE_EQ", instrument_type="EQ",
+                      data_key="NSE_EQ|TEST")
+    target = Target(instrument=inst, exchange="NSE", symbol="TEST", name="Test", chart_symbol="eq:NSE:TEST",
+                    tradable=True, chartable=True, origins=["custom"], key="NSE_EQ|TEST",
+                    provider="synthetic", source="synthetic")
+
+    def trend_data(sign: float) -> "scanner.SymbolData":
+        base = 3000.0 if sign > 0 else 9000.0
+        steps, steep = (3.0, 3.0, -2.0, -2.0), (5.0, 5.0, -2.0, -2.0)
+        hist = {}
+        for src in plan.sources:
+            start_day = previous_trading_day(today, src.sessions)
+            if src.base >= DAY:
+                bars, _ = _days(start_day, src.sessions, base, sign, steps)
+            else:
+                per = math.ceil((session_close("NSE_EQ", today) - session_open("NSE_EQ", today))
+                                .total_seconds() / 60 / src.base)
+                bars, _ = _trend_bars(session_open("NSE_EQ", start_day), src.base, src.sessions * per,
+                                      base, sign, steps, "NSE_EQ")
+            # Every source ends at the same price, where today's bars start.
+            shift = 5000.0 - bars[-1].close
+            hist[src.name] = CandleSeries([Candle(ts=x.ts, open=x.open + shift, high=x.high + shift,
+                                                  low=x.low + shift, close=x.close + shift,
+                                                  volume=x.volume) for x in bars])
+        tbars, _ = _trend_bars(session_open("NSE_EQ", today), 5, 21, 5000.0, sign, steep, "NSE_EQ")
+        return scanner.SymbolData(target=target, plan=plan, now=now, today=CandleSeries(tbars),
+                                  history=hist, ltp=None, close_time=None)
+
+    def c8():
+        detail = []
+        ok = True
+        for sign, want in ((1.0, ("BUY", "SELL")), (-1.0, ("SELL", "BUY"))):
+            data = trend_data(sign)
+            refs = [r for s in sides for r in plan.refs[s]]
+            found = scanner.evaluate_refs(data, refs, "full")
+            for side, expect in ((want[0], "true"), (want[1], "false")):
+                got = [found[(side, i)].result.state for i in range(7)]
+                ok &= got == [expect] * 7
+                detail.append(f"{side}{'+' if sign > 0 else '-'}:{''.join(g[0] for g in got)}")
+        return ok, " ".join(detail)
+    guard("scanner: uptrend meets all 7 BUY rows (SELL none); downtrend the reverse", c8)
+
+    # 9. short history
+    def c9():
+        bars, _ = _days(date(2026, 3, 2), 150, 1000.0, 1.0, (3.0, -2.0))
+        data = scanner.SymbolData(target=target, plan=plan, now=now, today=CandleSeries([]),
+                                  history={"day": CandleSeries(bars)}, ltp=None, close_time=None)
+        ref = plan.refs["BUY"][1]
+        ev = scanner.evaluate_refs(data, [ref], "full")[("BUY", 1)]
+        states = [True, ev.result.state == "true", True, True, True, True, True]
+        return ev.result.state == "unavailable" and rules.combine(sides["BUY"], states) is False, \
+            ev.result.detail
+    guard("scanner: 150 daily bars give [1D] EMA(200) n/a, counted as not met", c9)
+
+    # 10. combine truth table
+    def c10():
+        rows = [{"join": "AND"}, {"join": "AND"}, {"join": "OR"}]
+        cases = [([True, True, None], True), ([False, True, None], None), ([False, True, False], False),
+                 ([None, True, False], None), ([True, False, True], True), ([None, None, None], None)]
+        got = [rules.combine(rows, s) for s, _ in cases]
+        return got == [e for _, e in cases], str(got)
+    guard("scanner: combine is AND before OR, three-valued", c10)
+
+    # 11. MCX session end
+    def c11():
+        def feed(day):
+            return ScanFeed(broker=_Named("synthetic"), upstox=None, universes=None, cache=None,
+                            budget=None, quotes=None, today=day, clock=lambda: now,
+                            still_pinned=lambda: True, note=lambda _t: None)
+        mcx = Target(instrument=Instrument(security_id="9", symbol="GOLD FUT", segment="MCX_COMM",
+                                           instrument_type="FUTCOM", data_key="MCX_FO|9"),
+                     exchange="MCX", symbol="GOLD", name="GOLD", chart_symbol="mcx:GOLD", tradable=False,
+                     chartable=True, origins=["mcx"], key="MCX_FO|9", provider="upstox", source="upstox")
+        mplan = scanner.build_plan(sides, "MCX_COMM", today)
+
+        def sessions(day0, n, last_hhmm, base=5):
+            out = []
+            d = day0
+            while len({c.ts.date() for c in out}) < n:
+                if d.weekday() < 5:
+                    t = session_open("MCX_COMM", d)
+                    stop = datetime.combine(d, last_hhmm, tzinfo=IST)
+                    while t <= stop:
+                        out.append(Candle(ts=t, open=1, high=1, low=1, close=1, volume=1))
+                        t += timedelta(minutes=base)
+                d += timedelta(days=1)
+            return out
+        m5 = CandleSeries(sessions(date(2026, 10, 5), 5, dtime(23, 25)))
+        a = feed(today).close_time(mcx, {"m5": m5}, mplan)
+        b = feed(today).close_time(mcx, {"m120": CandleSeries(sessions(date(2026, 10, 5), 5, dtime(23, 0), 120))},
+                                   mplan)
+        thin = sessions(date(2026, 10, 5), 4, dtime(23, 25)) + sessions(date(2026, 10, 13), 1, dtime(21, 5))
+        c_ = feed(today).close_time(mcx, {"m5": CandleSeries(thin)}, mplan)
+        winter = date(2026, 12, 10)
+        d_ = feed(winter).close_time(mcx, {"m5": CandleSeries(sessions(date(2026, 12, 1), 5, dtime(23, 50)))},
+                                     scanner.build_plan(sides, "MCX_COMM", winter))
+        ok = (a == dtime(23, 30) and b == mcx_close_time(today) and b != dtime(12, 0)
+              and c_ == dtime(23, 30) and d_ == dtime(23, 55))
+        return ok, f"{a} {b} {c_} {d_}"
+    guard("scanner: MCX session end from m5 history (23:30, DST, thin, winter 23:55)", c11)
+
+    # 12. request pieces
+    def c12():
+        ok = (months_back(date(2026, 3, 31), 1) == date(2026, 2, 28)
+              and months_back(date(2024, 5, 31), 3) == date(2024, 2, 29))
+        n = 0
+        for base in (1, 5, 30, 120):
+            for end in (date(2026, 10, 13), date(2024, 2, 29), date(2026, 3, 31)):
+                start = end - timedelta(days=365)
+                pieces = request_pieces(base, start, end)
+                n += len(pieces)
+                ok &= pieces[0][1] == end and pieces[-1][0] == start
+                for (frm, to) in pieces:
+                    ok &= frm >= months_back(to, 1 if base <= 15 else 3) and frm <= to
+                for (f1, _t1), (_f2, t2) in zip(pieces, pieces[1:]):
+                    ok &= t2 == f1 - timedelta(days=1)
+        return ok, f"{n} pieces"
+    guard("scanner: Upstox request pieces stay inside the bounds and cover the window", c12)
+
+    # 13. price summary
+    def c13():
+        fri = date(2026, 10, 16)
+        day_bars = [Candle(ts=session_open("NSE_EQ", d), open=1, high=1, low=1, close=cl, volume=1)
+                    for d, cl in ((date(2026, 10, 14), 95.0), (date(2026, 10, 15), 100.0), (fri, 105.0))]
+        m5 = [Candle(ts=datetime.combine(fri, dtime(15, 25), tzinfo=IST), open=1, high=1, low=1,
+                     close=105.0, volume=1)]
+        sat = scanner.SymbolData(target=target, plan=plan, now=datetime.combine(date(2026, 10, 17), dtime(11, 0), tzinfo=IST),
+                                 today=CandleSeries([]), history={"day": CandleSeries(day_bars), "m5": CandleSeries(m5)},
+                                 ltp=None, close_time=None)
+        ltp, pday, prev, _ = scanner.price_summary(sat)
+        live = scanner.SymbolData(target=target, plan=plan, now=datetime.combine(fri, dtime(11, 0), tzinfo=IST),
+                                  today=CandleSeries([Candle(ts=datetime.combine(fri, dtime(10, 55), tzinfo=IST),
+                                                             open=1, high=1, low=1, close=110.0, volume=1)]),
+                                  history={"day": CandleSeries(day_bars[:2])}, ltp=None, close_time=None)
+        ltp2, pday2, prev2, _ = scanner.price_summary(live)
+        ok = (ltp, pday, prev) == (105.0, fri, 100.0) and (ltp2, pday2, prev2) == (110.0, fri, 100.0)
+        return ok, f"sat {ltp}/{pday}/{prev}; fri {ltp2}/{pday2}/{prev2}"
+    guard("scanner: price day and previous close (Saturday: Friday vs Thursday)", c13)
+
+    # 14. the budget
+    async def budget_cases() -> tuple[bool, str]:
+        notes = []
+        led = RequestLedger()
+        b = Budget(led, "scanner:t", rate=0.5, scanner_cap=100)
+        async with b.spend(1, "upstox"):
+            pass
+        ok = b.granted["upstox"] == 1
+        for p in ("upstox", "dhan", "other"):
+            cap0, rate0 = b.buckets[p].capacity, b.buckets[p].rate
+            b.penalise_429(p)
+            ok &= b.buckets[p].rate == rate0 / 2 and b.buckets[p].capacity == cap0
+        notes.append(f"rate0.5+429 {ok}")
+
+        led = RequestLedger()
+        flag = {"cancel": False}
+        b = Budget(led, "scanner:t", rate=8, scanner_cap=10, cancelled=lambda: flag["cancel"])
+        peak = [0]
+        outcomes: list[str] = []
+
+        async def one():
+            try:
+                async with b.spend(1, "upstox"):
+                    await asyncio.sleep(0.05)
+                    led.record("scanner:t")
+                    REQUEST_COUNTER.get()[0] += 1
+                    peak[0] = max(peak[0], led.count(1800, prefix="scanner"))
+                outcomes.append("ok")
+            except ScanCancelled:
+                outcomes.append("cancelled")
+
+        tasks = [asyncio.create_task(one()) for _ in range(12)]
+        while outcomes.count("ok") < 10:
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.1)
+        waiting = len(outcomes) == 10
+        flag["cancel"] = True
+        await asyncio.wait_for(asyncio.gather(*tasks), 2.0)
+        c12_ok = (waiting and peak[0] == 10 and outcomes.count("cancelled") == 2
+                  and b.in_flight() == 0)
+        ok &= c12_ok
+        notes.append(f"cap10 {c12_ok}")
+
+        led = RequestLedger()
+        b = Budget(led, "scanner:t", rate=8, scanner_cap=10, window_seconds=0.5)
+        peak = [0]
+
+        async def three():
+            async with b.spend(3, "upstox"):
+                for _ in range(3):
+                    led.record("scanner:t")
+                    REQUEST_COUNTER.get()[0] += 1
+                    peak[0] = max(peak[0], led.count(0.5, prefix="scanner"))
+        await asyncio.wait_for(asyncio.gather(*(three() for _ in range(6))), 3.0)
+        ok &= peak[0] <= 10 and b.in_flight() == 0
+        notes.append(f"spend3 peak {peak[0]}")
+        try:
+            async with b.spend(11, "upstox"):
+                pass
+            ok = False
+        except BrokerError as exc:
+            ok &= exc.code == "BUDGET"
+        e1 = eta_seconds(1000, rate=6, cap=1500, ages=[])
+        e2 = eta_seconds(2000, rate=6, cap=1500, ages=[])
+        ok &= abs(e1 - 1000 / 6) <= 1 and abs(e2 - (1800 + 500 / 6)) <= 1
+        led = RequestLedger()
+        for _ in range(400):
+            led.record("scanner:x")
+        ok &= available_now(led, scanner_cap=1500, in_flight=5) == 1095
+        notes.append(f"eta {e1:.0f}/{e2:.0f}")
+        return ok, ", ".join(notes)
+
+    guard("scanner: request budget (exact cap, cancelled waiters, BUDGET, ETA)",
+          lambda: asyncio.run(budget_cases()))
+
+    # 15. history-cache reuse rule
+    def c15():
+        d1 = date(2026, 10, 16)
+        at = lambda hh, mm: datetime.combine(d1, dtime(hh, mm), tzinfo=IST)  # noqa: E731
+        ok = (entry_usable(False, at(0, 10), at(0, 30), d1)
+              and not entry_usable(False, at(0, 10), at(0, 45), d1)
+              and not entry_usable(False, at(8, 50), at(9, 0), d1)
+              and entry_usable(False, at(10, 0), at(23, 0), d1)
+              and entry_usable(True, at(0, 10), at(23, 0), d1)
+              and not all_day(False, at(8, 59), d1) and all_day(False, at(9, 0), d1))
+        return ok, ""
+    guard("scanner: provisional history windows are reused 30 min, never from 09:00", c15)
+    return results
+
+
+class _Named:
+    """A stand-in data node for the close_time check (no I/O, no network)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
 
 
 def _chart_and_timeframe_checks(c: list, h: list, l: list) -> list[tuple[str, bool, str]]:

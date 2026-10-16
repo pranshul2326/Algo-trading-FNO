@@ -112,6 +112,16 @@ class CompositeBroker(Broker):
     ) -> CandleSeries:
         return await self.data.history_candles(instrument, interval_minutes, start, end)
 
+    async def today_candles(
+        self, instrument: Instrument, interval_minutes: int = 1, *, day: date | None = None
+    ) -> CandleSeries:
+        return await self.data.today_candles(instrument, interval_minutes, day=day)
+
+    async def history_window(
+        self, instrument: Instrument, interval_minutes: int, start: date, end: date
+    ) -> CandleSeries:
+        return await self.data.history_window(instrument, interval_minutes, start, end)
+
     async def ltp(self, instruments: list[Instrument]) -> dict[str, float]:
         return await self.data.ltp(instruments)
 

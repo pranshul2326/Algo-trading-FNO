@@ -154,19 +154,46 @@ def _operand(raw, where: str) -> dict:
     return out
 
 
-def normalize_rules(raw) -> list[dict] | None:
-    """Validate rows and fill in defaults. None stays None (use the legacy flags)."""
-    if raw is None:
-        return None
+def normalize_rows(
+    raw,
+    *,
+    label: str = "exit condition",
+    setting: str = "strategy.exit_rules",
+    max_rows: int = MAX_RULES,
+    min_rows: int = 0,
+    timeframes: bool = False,
+    default_on: str = "close",
+) -> list[dict]:
+    """Validate rows and fill in defaults. The body of normalize_rules, parameterised.
+
+    With the defaults this is exactly the exit-rule validation (same messages). The
+    scanner passes its own label/setting, min_rows=1, default_on="live" and
+    timeframes=True, which makes a per-row `tf` (a timeframes code) mandatory and also
+    reads a YAML 1.1 bare `on:` key, which loads as the boolean True.
+    """
     if not isinstance(raw, (list, tuple)):
-        raise ValueError("strategy.exit_rules must be a list of rows")
-    if len(raw) > MAX_RULES:
-        raise ValueError(f"at most {MAX_RULES} exit conditions, got {len(raw)}")
+        raise ValueError(f"{setting} must be a list of rows")
+    if len(raw) > max_rows:
+        raise ValueError(f"at most {max_rows} {label}s, got {len(raw)}")
+    if len(raw) < min_rows:
+        raise ValueError(
+            f"{setting} needs at least {min_rows} condition(s); use null for the defaults"
+        )
+    if timeframes:
+        from . import timeframes as tf_table
     out: list[dict] = []
     for n, row in enumerate(raw, start=1):
-        where = f"exit condition {n}"
+        where = f"{label} {n}"
         if not isinstance(row, dict):
             raise ValueError(f"{where}: expected a mapping, got {row!r}")
+        tf = None
+        if timeframes:
+            # Type first: normalise() calls .strip(), which a number or bool lacks.
+            raw_tf = row.get("tf")
+            tf = tf_table.normalise(raw_tf) if isinstance(raw_tf, str) else None
+            if tf is None:
+                codes = ", ".join(code for code, _, _ in tf_table.TIMEFRAMES)
+                raise ValueError(f"{where}: timeframe must be one of {codes}, got {raw_tf!r}")
         join = str(row.get("join") or "AND").strip().upper()
         if join not in JOINS:
             raise ValueError(f"{where}: join must be AND or OR, got {join!r}")
@@ -176,16 +203,28 @@ def normalize_rules(raw) -> list[dict] | None:
             raise ValueError(
                 f"{where}: unknown condition {op!r}. Available: {', '.join(COMPARATORS)}"
             )
-        on = str(row.get("on") or "close").strip().lower()
+        if timeframes:
+            on = str(row.get("on", row.get(True)) or default_on).strip().lower()
+        else:
+            on = str(row.get("on") or default_on).strip().lower()
         if on not in EVAL_ON:
             raise ValueError(f"{where}: 'on' must be close or live, got {on!r}")
         left = _operand(row.get("left"), f"{where}, left side")
         if left["ind"] == "value":
             raise ValueError(f"{where}: the left side must be an indicator; put the number on the right")
         right = _operand(row.get("right"), f"{where}, right side")
-        out.append({"join": "AND" if n == 1 else join, "left": left, "op": op,
-                    "right": right, "on": on})
+        if timeframes:
+            out.append({"tf": tf, "join": "AND" if n == 1 else join, "left": left, "op": op,
+                        "right": right, "on": on})
+        else:
+            out.append({"join": "AND" if n == 1 else join, "left": left, "op": op,
+                        "right": right, "on": on})
     return out
+
+
+def normalize_rules(raw) -> list[dict] | None:
+    """Validate rows and fill in defaults. None stays None (use the legacy flags)."""
+    return None if raw is None else normalize_rows(raw)
 
 
 def legacy_rules(cfg) -> list[dict]:
@@ -242,13 +281,17 @@ def _operand_warmup(o: dict) -> int:
     return 1
 
 
-def _row_warmup(row: dict) -> int:
+def row_warmup(row: dict) -> int:
+    """Bars one row needs before it can be evaluated."""
     extra = 1 if row["op"].startswith("crosses") else 0
     return max(_operand_warmup(row["left"]), _operand_warmup(row["right"])) + extra
 
 
+_row_warmup = row_warmup  # the older private name
+
+
 def rules_warmup(rows: list[dict] | None) -> int:
-    return max((_row_warmup(r) for r in rows or []), default=0)
+    return max((row_warmup(r) for r in rows or []), default=0)
 
 
 # --------------------------------------------------------------- wording
@@ -286,6 +329,18 @@ def describe_operand(o: dict) -> str:
 
 
 def describe_rule(row: dict, *, timing: bool = True) -> str:
+    tf = row.get("tf")
+    if tf is not None:
+        # A scanner row: its own timeframe, and on a live row the close is the price.
+        live = row.get("on") == "live"
+
+        def word(o: dict) -> str:
+            return "Price" if live and o["ind"] == "close" else describe_operand(o)
+
+        text = f"[{tf}] {word(row['left'])} {COMPARATORS[row['op']]['label']} {word(row['right'])}"
+        if timing:
+            text += " (live)" if live else " (last closed candle)"
+        return text
     text = (
         f"{describe_operand(row['left'])} {COMPARATORS[row['op']]['label']} "
         f"{describe_operand(row['right'])}"
@@ -304,6 +359,21 @@ def groups(rows: list[dict]) -> list[list[int]]:
         else:
             out[-1].append(i)
     return out
+
+
+def combine(rows: list[dict], states: list[bool | None]) -> bool | None:
+    """AND before OR over partially known rows. True: some OR group has every row True.
+    False: every group has a row that is False. None: undecided. The caller maps
+    'unavailable' to False and 'not evaluated yet' to None."""
+    undecided = False
+    for g in groups(rows):
+        vals = [states[i] for i in g]
+        if all(v is True for v in vals):
+            return True
+        if any(v is False for v in vals):
+            continue
+        undecided = True
+    return None if undecided else False
 
 
 def describe_rules(rows: list[dict]) -> str:
@@ -457,7 +527,8 @@ def live_series(closed: CandleSeries, forming: Candle | None, ltp: float | None)
     return CandleSeries([*closed.candles, bar])
 
 
-def _row(i: int, rule: dict, calc: SeriesCalc, text: str) -> RowResult:
+def evaluate_row(i: int, rule: dict, calc: SeriesCalc, text: str) -> RowResult:
+    """One row on the newest bar of `calc`'s series."""
     on = rule["on"]
     n = calc.n
     candle = calc.series.last
@@ -471,7 +542,7 @@ def _row(i: int, rule: dict, calc: SeriesCalc, text: str) -> RowResult:
     ltxt, rname = describe_operand(rule["left"]), describe_operand(rule["right"])
     if math.isnan(cur_a) or math.isnan(cur_b):
         return RowResult(i, text, on, "unavailable",
-                         f"{describe_rule(rule, timing=False)}: needs {_row_warmup(rule)} "
+                         f"{describe_rule(rule, timing=False)}: needs {row_warmup(rule)} "
                          f"candles of history, have {n}", candle_ts=ts)
     rtxt = rname if rule["right"]["ind"] == "value" else f"{rname} {cur_b:.2f}"
     op = rule["op"]
@@ -499,6 +570,9 @@ def _row(i: int, rule: dict, calc: SeriesCalc, text: str) -> RowResult:
     else:
         detail = f"{ltxt} {cur_a:.2f} vs {rtxt}"
     return RowResult(i, text, on, "true" if hit else "false", detail, cur_a, cur_b, ts)
+
+
+_row = evaluate_row  # the older private name
 
 
 def evaluate(
@@ -540,7 +614,7 @@ def evaluate(
         if rule["on"] == "close" and gate:
             results.append(RowResult(i, text, "close", "waiting", gate))
             continue
-        results.append(_row(i, rule, calcs[rule["on"]], text))
+        results.append(evaluate_row(i, rule, calcs[rule["on"]], text))
 
     for g in groups(rules):
         if all(results[i].hit for i in g):

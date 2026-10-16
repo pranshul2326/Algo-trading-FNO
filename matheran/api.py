@@ -17,7 +17,8 @@ from datetime import datetime
 
 from . import chart_indicators, chart_types, data_source, timeframes
 from .baskets import BasketLeg, BasketStore, unit_weights
-from .brokers import build_broker
+from . import scanner as scanner_mod
+from .brokers import build_broker, find_upstox
 from .brokers.base import BrokerError
 from .candles import bar_end
 from .chain_page import CHAIN_HTML
@@ -51,8 +52,11 @@ from .options import (
     select_chain,
     select_full_chain,
 )
+from .scan_data import RunLock, data_source_name
+from .scanner import ScanBusy, ScanIdle, ScanManager, ScanRefused, ScanSpec
 from .settings import CREDENTIAL_KEYS, SettingsManager, generate_api_key
 from .store import Store
+from .universes import UNIVERSE_IDS, UniverseUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -321,6 +325,7 @@ class ConfigBody(BaseModel):
     strategy: dict | None = None
     risk: dict | None = None
     options: dict | None = None
+    scanner: dict | None = None
     confirm_live: bool = Field(
         False, description="Must be true to switch mode to live, which sends real orders"
     )
@@ -340,6 +345,63 @@ class ExitRulesBody(BaseModel):
     rules: list | None = Field(
         ..., description="Rows as in strategy.exit_rules; null for the default two"
     )
+
+
+class ScanRulesBody(BaseModel):
+    """Scanner rows to read back. null = the saved rows, else the defaults (BUY), the
+    mirror of BUY (SELL), linked iff no SELL rows are saved (sell_linked)."""
+
+    buy_rules: list | None = None
+    sell_rules: list | None = None
+    sell_linked: bool | None = None
+
+
+class ScanRequest(ScanRulesBody):
+    """One scan (estimate or run). Every null field falls back to the saved scanner settings."""
+
+    universes: list[str] | None = Field(None, max_length=10)
+    custom_symbols: list[str] | None = Field(None, max_length=200)
+    side: str | None = Field(None, description="both, buy or sell")
+    evaluation: str | None = Field(None, description="auto, complete or lazy")
+    trigger: str = Field("manual", description="manual, or auto for an auto-rescan")
+    interval_minutes: int | None = Field(
+        None, description="Auto-rescan interval: 2, 5, 10, 15, 30 or 60 (required when auto)"
+    )
+
+    @field_validator("side")
+    @classmethod
+    def _side(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        if v not in {"both", "buy", "sell"}:
+            raise ValueError("side must be both, buy or sell")
+        return v
+
+    @field_validator("evaluation")
+    @classmethod
+    def _evaluation(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        if v not in {"auto", "complete", "lazy"}:
+            raise ValueError("evaluation must be auto, complete or lazy")
+        return v
+
+    @field_validator("trigger")
+    @classmethod
+    def _trigger(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in {"manual", "auto"}:
+            raise ValueError("trigger must be manual or auto")
+        return v
+
+    @field_validator("interval_minutes")
+    @classmethod
+    def _interval(cls, v: int | None) -> int | None:
+        if v is not None and v not in (2, 5, 10, 15, 30, 60):
+            raise ValueError("interval_minutes must be 2, 5, 10, 15, 30 or 60")
+        return v
 
 
 class ChartTradeBody(TradeChoices):
@@ -443,6 +505,10 @@ CHART_TRADE_STATES = {
     WatchState.IN_POSITION,
     WatchState.EXIT_PLACED,
 }
+MCX_TRADE_REFUSED = (
+    "MCX commodities can be charted but not traded here: the engine trades NSE/BSE "
+    "equities and NSE/BSE F&O"
+)
 # Underlyings whose spot is an index rather than a stock, for the combo screen.
 INDEX_UNDERLYINGS = {
     "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "SENSEX", "BANKEX",
@@ -488,7 +554,10 @@ def create_app(
         try:
             yield
         finally:
-            await engine.stop()
+            try:
+                await app.state.scanner.shutdown()
+            finally:
+                await engine.stop()
 
     app = FastAPI(
         title="Matheran trading API",
@@ -503,6 +572,9 @@ def create_app(
     app.state.engine = engine
     app.state.settings = settings
     app.state.broker_dirty = False
+    # The live BUY/SELL scanner: read-only, one scan at a time, on the engine's data path.
+    scans = ScanManager(cfg, engine)
+    app.state.scanner = scans
 
     async def require_key(x_api_key: str | None = Header(None, alias="X-API-Key")) -> None:
         # Read the key per request so setting it from the UI takes effect immediately.
@@ -539,6 +611,24 @@ def create_app(
     @app.exception_handler(ValueError)
     async def _value_error(_request: Request, exc: ValueError):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    # Scanner outcomes: busy / nothing running (409), an auto run refused by the request
+    # budget (429), and an index list with no live copy, cache or snapshot (502).
+    @app.exception_handler(ScanBusy)
+    async def _scan_busy(_request: Request, exc: ScanBusy):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(ScanIdle)
+    async def _scan_idle(_request: Request, exc: ScanIdle):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(ScanRefused)
+    async def _scan_refused(_request: Request, exc: ScanRefused):
+        return JSONResponse(status_code=429, content={"detail": str(exc)})
+
+    @app.exception_handler(UniverseUnavailable)
+    async def _universe_unavailable(_request: Request, exc: UniverseUnavailable):
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     # ----------------------------------------------------------------- basics
     @app.get("/health", tags=["control"])
@@ -1157,6 +1247,8 @@ def create_app(
         # half-valid. Lots are turned into units here, with the contract's real lot
         # size, so an unusable quantity surfaces now rather than at execution.
         legs: list[BasketLeg] = []
+        if any(item.symbol.strip().lower().startswith("mcx:") for item in body.legs):
+            raise HTTPException(400, MCX_TRADE_REFUSED)
         for item in body.legs:
             symbol = item.symbol if ":" in item.symbol else f"eq:NSE:{item.symbol.upper()}"
             instrument = await _leg_instrument(symbol)
@@ -1539,6 +1631,103 @@ def create_app(
         await engine.tick()
         return engine.status()
 
+    # ---------------------------------------------------------------- scanner
+    # Read-only: nothing here places an order or creates a watch. Every handler is
+    # async (the request ledger lives on the event loop); files are read in threads.
+    def _scan_body(body: BaseModel) -> dict:
+        return body.model_dump()
+
+    @app.get("/api/scanner", tags=["scanner"], dependencies=auth)
+    async def scanner_overview(request: Request):
+        """Rows, options, defaults, catalog, universes, budget and the current scan."""
+        sc = cfg.scanner
+        buy, sell, linked = scanner_mod.effective_rows(sc)
+        universes = await asyncio.to_thread(scans.universes.info)
+        budget = await scans.budget_status()
+        job = scans.current
+        peer = request.client.host if request.client else ""
+        return {
+            "config": {
+                "buy_rules": buy,
+                "sell_rules": sell,
+                "sell_linked": linked,
+                "buy_customised": sc.buy_rules is not None,
+                "universes": list(sc.universes),
+                "custom_symbols": list(sc.custom_symbols),
+                "side": sc.side,
+                "evaluation": sc.evaluation,
+                "auto_rescan_minutes": sc.auto_rescan_minutes,
+                "max_requests_per_30min": sc.max_requests_per_30min,
+                "requests_per_second": sc.requests_per_second,
+                "concurrency": sc.concurrency,
+            },
+            "defaults": {"buy_rules": scanner_mod.DEFAULT_BUY_ROWS},
+            "catalog": scanner_mod.catalog(),
+            "universes": universes,
+            "budget": budget,
+            "scan": job.summary() if job is not None else {"state": "idle"},
+            "can_save": peer in LOOPBACK_HOSTS,
+            "mcx_charts": find_upstox(engine.broker) is not None,
+            "data_source": data_source_name(engine.broker),
+        }
+
+    @app.post("/api/scanner/preview", tags=["scanner"], dependencies=auth)
+    async def scanner_preview(body: ScanRulesBody):
+        """BUY and SELL rows read back in words, their columns, and the data per symbol."""
+        return scanner_mod.preview(cfg.scanner, _scan_body(body), now_ist().date())
+
+    @app.get("/api/scanner/universes", tags=["scanner"], dependencies=auth)
+    async def scanner_universes(
+        load: str | None = Query(None, description="Comma-separated universe ids to load now"),
+    ):
+        """Every universe with its size, source and date; `load` fetches the named ones
+        first (network). A universe that fails carries `error` inline."""
+        ids: list[str] = []
+        for token in (load or "").split(","):
+            uid = token.strip().lower()
+            if not uid:
+                continue
+            if uid not in UNIVERSE_IDS:
+                raise HTTPException(
+                    400, f"load: unknown universe {token.strip()!r}. "
+                    f"Available: {', '.join(UNIVERSE_IDS)}"
+                )
+            if uid not in ids:
+                ids.append(uid)
+        errors = await scans.load_universes(ids) if ids else {}
+        info = await asyncio.to_thread(scans.universes.info)
+        for entry in info:
+            if entry["id"] in errors:
+                entry["error"] = errors[entry["id"]]
+        return {"universes": info}
+
+    @app.post("/api/scanner/estimate", tags=["scanner"], dependencies=auth)
+    async def scanner_estimate(body: ScanRequest):
+        """Requests and time a scan of this selection would take, before running it."""
+        spec = ScanSpec.build(cfg.scanner, _scan_body(body))
+        return await scans.estimate(spec)
+
+    @app.post("/api/scanner/run", tags=["scanner"], dependencies=auth, status_code=202)
+    async def scanner_run(body: ScanRequest):
+        """Start a scan in the background; poll /api/scanner/status for progress."""
+        spec = ScanSpec.build(cfg.scanner, _scan_body(body))
+        job = await scans.start(spec)
+        return {"scan": job.summary(), "estimate": job.checked_estimate}
+
+    @app.get("/api/scanner/status", tags=["scanner"], dependencies=auth)
+    async def scanner_status(since: int = Query(0, ge=0)):
+        """The current scan and the results with seq > since."""
+        job = scans.current
+        other = None
+        if job is None or not job.active:
+            other = await asyncio.to_thread(RunLock.holder, scans.lock.path)
+        return scans.status(since, other=other)
+
+    @app.post("/api/scanner/cancel", tags=["scanner"], dependencies=auth)
+    async def scanner_cancel():
+        job = scans.cancel()
+        return {"scan": job.summary()}
+
     # ----------------------------------------------------------------- charts
     # One source instance per registered provider, built on first use. The broker
     # source is rebuilt whenever the engine swaps brokers so charts never serve
@@ -1576,9 +1765,27 @@ def create_app(
         q: str = Query("", description="Filter text; empty returns defaults"),
         source: str = Query("broker"),
         limit: int = Query(200, ge=1, le=1000),
+        exchanges: str = Query("NSE", description="Comma-separated: NSE, BSE, MCX"),
     ):
+        wanted: list[str] = []
+        for token in exchanges.split(","):
+            token = token.strip().upper()
+            if not token:
+                continue
+            if token not in {"NSE", "BSE", "MCX"}:
+                raise HTTPException(400, "exchanges: use NSE, BSE or MCX")
+            if token not in wanted:
+                wanted.append(token)
+        if not wanted:
+            raise HTTPException(400, "exchanges: use NSE, BSE or MCX")
         src = _chart_source(source)
-        found = await src.search(q, limit)
+        if wanted == ["NSE"]:
+            found = await src.search(q, limit)
+        elif isinstance(src, data_source.BrokerDataSource):
+            found = await src.search(q, limit, exchanges=tuple(wanted),
+                                     upstox=app.state.scanner.upstox())
+        else:
+            raise HTTPException(400, f"the {source} source offers NSE symbols only")
         return {"source": source, "count": len(found), "symbols": [s.as_dict() for s in found]}
 
     @app.get("/api/charts/candles", tags=["charts"], dependencies=auth)
@@ -1733,6 +1940,8 @@ def create_app(
             )
         if kind == "basket":
             raise HTTPException(400, "a basket is executed from the Baskets tab")
+        if kind.lower() == "mcx":
+            raise HTTPException(400, MCX_TRADE_REFUSED)
         if cfg.live and not body.confirm:
             raise HTTPException(
                 400,

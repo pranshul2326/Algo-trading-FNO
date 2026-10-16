@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Iterable
 
 from .brokers.base import Broker, BrokerError
@@ -77,17 +77,23 @@ class ChainSelection:
     expires_today: bool  # last trading day: theta is brutal, flag it to the operator
 
 
-def active_expiries(expiries: Iterable[str], segment: str = "NSE_FNO") -> list[str]:
+def active_expiries(
+    expiries: Iterable[str], segment: str = "NSE_FNO", *, close_time: time | None = None
+) -> list[str]:
     """Expiries still worth trading, nearest first.
 
     Today's series is tradable right up to the close, but once the session has ended
     it is dead: every strike prints its residual value and no signal on it means
     anything. Shared by the chain scanner and the chart symbol picker so they never
-    disagree about which expiry is current.
+    disagree about which expiry is current. `close_time` replaces the segment's
+    session close (the MCX lookups pass timeutil.mcx_close_time(today)).
     """
     now = now_ist()
     today = now.date().isoformat()
-    settled_today = now > session_close(segment, now.date())
+    if close_time is None:
+        settled_today = now > session_close(segment, now.date())
+    else:
+        settled_today = now > datetime.combine(now.date(), close_time, tzinfo=IST)
     rows = sorted({e for e in expiries if e})
     if settled_today:
         return [e for e in rows if e > today]
@@ -533,6 +539,7 @@ async def oi_chain(
         "as_of": as_of,
         "errors": sum(1 for _, raw, err in fetched if err),
     }
+
 
 # ------------------------------------------------------------ straddle table
 STRADDLE_STRIKES_EACH_SIDE = 7

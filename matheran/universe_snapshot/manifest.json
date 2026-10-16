@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-16",
+  "source": "https://archives.nseindia.com/content/indices/",
+  "files": {
+    "ind_nifty50list.csv": {
+      "rows": 50,
+      "tradable": 50,
+      "sha256": "f5ba4027d935ae72879d5c24bbebf0e8439ec8ed504ffdf4175fde69206244b3"
+    },
+    "ind_niftynext50list.csv": {
+      "rows": 50,
+      "tradable": 50,
+      "sha256": "b05337532e755953b588677216012f9b59e69ff39f3dfbbab61e96fc2d724e47"
+    },
+    "ind_nifty200list.csv": {
+      "rows": 200,
+      "tradable": 200,
+      "sha256": "27851fa65cabfc2b9cdbeaf92fdefc34ab841e8a60b3974defcc14aed7be2dd4"
+    },
+    "ind_nifty500list.csv": {
+      "rows": 501,
+      "tradable": 500,
+      "sha256": "2959bf206239284e145f7aecc65095b18d11556d2642323a70f2d26efe0f5cb3"
+    },
+    "ind_niftymidcap150list.csv": {
+      "rows": 150,
+      "tradable": 150,
+      "sha256": "3fe5312472d1130282acdd7d4a08a765b2c1e6329e92a947deb6f5227545d352"
+    },
+    "ind_niftymidcap100list.csv": {
+      "rows": 100,
+      "tradable": 100,
+      "sha256": "c2def031d14e2878a87c38e4ebf59c1089f8028cdf2c0c1d0192f85299e120bf"
+    },
+    "ind_niftysmallcap250list.csv": {
+      "rows": 251,
+      "tradable": 250,
+      "sha256": "48ed754ed01486a3d60011a867b328f484325385376c7727951503c87a452510"
+    },
+    "ind_niftysmallcap100list.csv": {
+      "rows": 100,
+      "tradable": 100,
+      "sha256": "2f2a4dd209640cf8ae8ca277ccaaf08bf76e96c329bc26959761c710d0c28f01"
+    }
+  }
+}

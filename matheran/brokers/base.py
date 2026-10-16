@@ -12,15 +12,19 @@ from datetime import date
 
 from ..candles import CandleSeries
 from ..models import Instrument, OrderStatus, OrderType, Side
+from ..timeutil import now_ist
 
 
 class BrokerError(RuntimeError):
     """Raised for broker-reported failures (auth, validation, rejected order)."""
 
-    def __init__(self, message: str, *, code: str = "", retryable: bool = False):
+    def __init__(
+        self, message: str, *, code: str = "", retryable: bool = False, status: int = 0
+    ):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.status = status  # the HTTP status when known, else 0
 
 
 @dataclass(slots=True)
@@ -101,6 +105,27 @@ class Broker(ABC):
         built from intraday_candles alone (timeframes.load_series).
         """
         raise BrokerError(f"{self.name} does not serve historical candles")
+
+    async def today_candles(
+        self, instrument: Instrument, interval_minutes: int = 1, *, day: date | None = None
+    ) -> CandleSeries:
+        """Today's candles, the forming one included, at interval_minutes or any finer
+        interval that divides it (DAY means one session candle). One request where the
+        provider allows. This default asks for 1-minute candles, which every broker
+        already serves for the engine (Dhan, for one, has no 3- or 9-minute interval),
+        and trims them to `day` (default: today in IST; the scanner passes its pinned
+        scan day); the caller resamples."""
+        today = day or now_ist().date()
+        series = await self.intraday_candles(instrument, today, 1)
+        return CandleSeries([c for c in series.candles if c.ts.date() == today])
+
+    async def history_window(
+        self, instrument: Instrument, interval_minutes: int, start: date, end: date
+    ) -> CandleSeries:
+        """history_candles for one window, in as few requests as the provider allows.
+        Same contract (completed sessions only, start..end inclusive, finer intervals
+        allowed)."""
+        return await self.history_candles(instrument, interval_minutes, start, end)
 
     @abstractmethod
     async def ltp(self, instruments: list[Instrument]) -> dict[str, float]:

@@ -59,7 +59,9 @@ class SyntheticFeed:
             return self.BASE_PRICES[name]
         return 500.0 + (self._seed(instrument) % 2000)
 
-    def candles(self, instrument: Instrument, day: date) -> CandleSeries:
+    def candles(self, instrument: Instrument, day: date, cache: bool = True) -> CandleSeries:
+        """With cache=False an existing entry is still used, but a new one is not
+        stored (a scan over hundreds of symbols must not keep their minutes)."""
         key = f"{instrument.security_id}:{day.isoformat()}"
         if key in self._cache:
             return self._cache[key]
@@ -77,7 +79,8 @@ class SyntheticFeed:
         candles.extend(self._session(rng, day, instrument, price, vol_scale, cap_to_now=True))
 
         series = CandleSeries(candles)
-        self._cache[key] = series
+        if cache:
+            self._cache[key] = series
         return series
 
     def history(
@@ -304,6 +307,22 @@ class PaperBroker(Broker):
     ) -> CandleSeries:
         if self.data_broker:
             return await self.data_broker.history_candles(instrument, interval_minutes, start, end)
+        return self.synthetic.history(instrument, interval_minutes, start, end)
+
+    async def today_candles(
+        self, instrument: Instrument, interval_minutes: int = 1, *, day: date | None = None
+    ) -> CandleSeries:
+        if self.data_broker:
+            return await self.data_broker.today_candles(instrument, interval_minutes, day=day)
+        today = day or now_ist().date()
+        series = self.synthetic.candles(instrument, today, cache=False)
+        return CandleSeries([c for c in series.candles if c.ts.date() == today])
+
+    async def history_window(
+        self, instrument: Instrument, interval_minutes: int, start: date, end: date
+    ) -> CandleSeries:
+        if self.data_broker:
+            return await self.data_broker.history_window(instrument, interval_minutes, start, end)
         return self.synthetic.history(instrument, interval_minutes, start, end)
 
     async def ltp(self, instruments: list[Instrument]) -> dict[str, float]:

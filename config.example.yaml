@@ -92,3 +92,33 @@ options:
   otm_count: 5             # ATM plus 5 OTM strikes each side
   default_underlying: NIFTY
   expiry: nearest          # nearest | YYYY-MM-DD
+# Live BUY/SELL scanner (Scanner tab, run.py scan). Read-only: it never places orders.
+# Each row is one condition on its own timeframe, written like the exit rules above, plus
+#   tf: 1m 3m 5m 9m 15m 30m 1h 2h 1D 1W 1M
+#   'on': live  = the forming candle, its close at the live price (as TradingView draws it)
+#         close = the last closed candle
+# Keep 'on' in quotes: YAML reads a bare on: as true/false.
+# Rows are joined by AND / OR (AND binds tighter). buy_rules: null = these seven rows.
+# sell_rules: null mirrors the BUY rows: above <-> below, RSI levels reflected around 50.
+scanner:
+  buy_rules:
+    - {tf: 1W,  left: {ind: rsi, period: 14}, op: at_or_above, right: {ind: value, value: 50}, 'on': live}
+    - {tf: 1D,  join: AND, left: {ind: close}, op: at_or_above, right: {ind: ema, period: 200}, 'on': live}
+    - {tf: 1D,  join: AND, left: {ind: close}, op: above, right: {ind: supertrend, period: 21, factor: 0.618}, 'on': live}
+    - {tf: 2h,  join: AND, left: {ind: close}, op: above, right: {ind: supertrend, period: 21, factor: 0.618}, 'on': live}
+    - {tf: 5m,  join: AND, left: {ind: close}, op: above, right: {ind: supertrend, period: 21, factor: 0.618}, 'on': live}
+    - {tf: 15m, join: AND, left: {ind: close}, op: above, right: {ind: vwap}, 'on': live}
+    - {tf: 15m, join: AND, left: {ind: rsi, period: 21}, op: at_or_above, right: {ind: rsi_ema, rsi: 21, period: 14}, 'on': live}
+  sell_rules: null
+  universes: [nifty50]       # nifty50 niftynext50 fno nifty200 nifty500 midcap150 midcap100
+                             # smallcap250 smallcap100 mcx (several = their union)
+  custom_symbols: []         # e.g. [NSE:RELIANCE, BSE:TCS, MCX:GOLD]
+  side: both                 # both | buy | sell
+  evaluation: auto           # auto = every condition when the budget allows; lazy = stop at a failure
+  auto_rescan_minutes: 0     # 0 = off; 2 5 10 15 30 60: the console's default interval. It starts only
+                             # after you press Run, never on page load, and is refused when it would
+                             # exceed the budget. run.py scan ignores it.
+  max_requests_per_30min: 1500   # the scanner's share of Upstox's 2,000 requests per 30 minutes,
+                                 # counted across Matheran processes sharing this cache directory
+  requests_per_second: 6         # 0.5-8; the engine keeps the rest of Upstox's 10/s
+  concurrency: 6

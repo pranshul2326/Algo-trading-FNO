@@ -18,7 +18,9 @@ chart. That is the whole contract.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -138,6 +140,9 @@ def chart_symbol_for(instrument) -> str:
     segment = instrument.segment or ""
     if instrument.instrument_type == "INDEX" or segment == "IDX_I":
         return f"idx:{instrument.symbol.upper()}"
+    if segment == "MCX_COMM":
+        und = (instrument.underlying or instrument.symbol).upper()
+        return f"mcx:{und}" + (f":{instrument.expiry}" if instrument.expiry else "")
     if (
         instrument.option_type in ("CE", "PE")
         and instrument.underlying
@@ -191,7 +196,17 @@ class BrokerDataSource(DataSource):
 
     INDEX_NAMES = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
 
-    async def search(self, query: str, limit: int = 40) -> list[SymbolRef]:
+    async def search(
+        self,
+        query: str,
+        limit: int = 40,
+        *,
+        exchanges: tuple[str, ...] = ("NSE",),
+        upstox=None,
+    ) -> list[SymbolRef]:
+        if tuple(exchanges) != ("NSE",):
+            # The scanner's suggest: cash equities and MCX near months only.
+            return await self._search_exchanges(query, limit, tuple(exchanges), upstox)
         raw = (query or "").strip()
         # A label pasted back ("RELIANCE — Reliance Industries") searches by its ticker.
         if " — " in raw:
@@ -288,6 +303,103 @@ class BrokerDataSource(DataSource):
             equities_out.extend(stock_futures)
         out = contracts + baskets + indices + futures_out + equities_out + options_out
         return out[:limit]
+
+    async def _search_exchanges(
+        self, query: str, limit: int, exchanges: tuple[str, ...], upstox
+    ) -> list[SymbolRef]:
+        """Cash equities of the named exchanges and MCX near-month commodities, in the
+        order MCX head (underlying = or starts with the text), NSE, BSE, MCX tail.
+        Each exchange is capped at ceil(limit / len(exchanges)). Best-effort: a missing
+        Upstox node or master leaves that group empty."""
+        from .brokers import find_upstox
+
+        raw = (query or "").strip()
+        if " — " in raw:
+            raw = raw.split(" — ", 1)[0]
+        q = raw.upper()
+        cap = max(1, math.ceil(limit / max(1, len(exchanges))))
+        up = upstox if upstox is not None else find_upstox(self.broker)
+
+        nse_out: list[SymbolRef] = []
+        if "NSE" in exchanges:
+            await self._warm_instruments()
+            for inst in self._equity_hits(self._equity_index(), "NSE", q)[:cap]:
+                nse_out.append(
+                    SymbolRef(
+                        id=f"eq:NSE:{inst.symbol}",
+                        label=f"{inst.symbol} — {inst.display_name[:34]}",
+                        group="NSE equity",
+                    )
+                )
+
+        bse_out: list[SymbolRef] = []
+        if "BSE" in exchanges and up is not None:
+            try:
+                holder = await up.exchange_instruments("BSE")
+            except BrokerError as exc:
+                log.warning("charts: could not load the BSE instruments: %s", exc)
+                holder = None
+            if holder is not None:
+                for inst in self._equity_hits(holder.equities, "BSE", q)[:cap]:
+                    bse_out.append(
+                        SymbolRef(
+                            id=f"eq:BSE:{inst.symbol}",
+                            label=f"{inst.symbol} — {(inst.display_name or '')[:30]} (BSE)",
+                            group="BSE equity",
+                        )
+                    )
+
+        head: list[SymbolRef] = []
+        tail: list[SymbolRef] = []
+        if "MCX" in exchanges and up is not None:
+            try:
+                rows = await up.commodity_underlyings()
+            except BrokerError as exc:
+                log.warning("charts: could not load the MCX instruments: %s", exc)
+                rows = []
+            head_rows, tail_rows = [], []
+            for inst in rows:
+                und = (inst.underlying or inst.symbol).upper()
+                if und == q or und.startswith(q):
+                    head_rows.append((0 if und == q else 1, und, inst))
+                elif q in und or (
+                    len(q) >= 3
+                    and (q in inst.symbol.upper() or q in (inst.display_name or "").upper())
+                ):
+                    tail_rows.append((2, und, inst))
+            head_rows.sort(key=lambda r: r[:2])
+            tail_rows.sort(key=lambda r: r[:2])
+            for bucket, und, inst in (head_rows + tail_rows)[:cap]:
+                ref = SymbolRef(
+                    id=f"mcx:{und}",
+                    label=f"{und} — MCX near month {inst.expiry}",
+                    group="MCX commodity",
+                )
+                (head if bucket < 2 else tail).append(ref)
+
+        out = head + nse_out + bse_out + tail
+        return out[:limit]
+
+    def _equity_hits(self, equities: dict, exchange: str, q: str) -> list:
+        """Cash names of one exchange matching q: exact ticker, prefix, substring, then
+        company name; liquid names first inside each group (as the NSE search does)."""
+        hits = []
+        for (exch, symbol), inst in equities.items():
+            if exch != exchange or self._is_test(symbol):
+                continue
+            if not q or symbol == q:
+                bucket = 0
+            elif symbol.startswith(q):
+                bucket = 1
+            elif q in symbol:
+                bucket = 2
+            elif len(q) >= 3 and q in (inst.display_name or "").upper():
+                bucket = 3
+            else:
+                continue
+            hits.append((bucket, self._liquidity_rank(symbol), symbol, inst))
+        hits.sort(key=lambda row: row[:3])
+        return [row[3] for row in hits]
 
     def _basket_refs(self, q: str) -> list[SymbolRef]:
         """Saved baskets by name. Otherwise a basket is reachable only by its id."""
@@ -416,16 +528,9 @@ class BrokerDataSource(DataSource):
 
     def _nodes(self) -> Iterable:
         """Walk the broker graph; wrappers nest several levels deep."""
-        seen: set[int] = set()
-        stack = [self.broker]
-        while stack:
-            node = stack.pop()
-            if node is None or id(node) in seen:
-                continue
-            seen.add(id(node))
-            yield node
-            for attr in ("data", "execution", "data_broker"):
-                stack.append(getattr(node, attr, None))
+        from .brokers import broker_nodes
+
+        return broker_nodes(self.broker)
 
     async def _warm_instruments(self) -> None:
         """Make sure an instrument master is loaded before reading its indexes.
@@ -498,11 +603,25 @@ class BrokerDataSource(DataSource):
         usable = [f for f in rows if f.expiry in live]
         return sorted(usable or rows, key=lambda f: f.expiry or "")
 
-    async def _resolve(self, symbol: str):
+    async def _resolve(self, symbol: str, *, for_data: bool = False):
+        """A chart symbol id -> an instrument. `for_data` (candles and meta only) lets a
+        BSE equity the engine cannot resolve fall back to the Upstox BSE master, so it
+        can be charted; orders, baskets and watches keep the engine's resolution."""
         kind, _, rest = symbol.partition(":")
         if kind == "eq":
             exchange, _, name = rest.partition(":")
+            if for_data and (exchange or "NSE").upper() == "BSE":
+                return await self._resolve_bse_data(name)
             return await self.broker.resolve_equity(name, exchange or "NSE")
+        if kind == "mcx":
+            # mcx:<UNDERLYING>[:<YYYY-MM-DD>] - defaults to the near month
+            from .brokers import find_upstox
+
+            und, _, expiry = rest.partition(":")
+            up = find_upstox(self.broker)
+            if up is None:
+                raise BrokerError("MCX symbols need the Upstox data provider")
+            return await up.resolve_commodity(und, expiry or None)
         if kind == "idx":
             inst = await self.broker.index_instrument(rest)
             if inst is None:
@@ -538,6 +657,32 @@ class BrokerDataSource(DataSource):
         # Bare text is treated as an NSE equity symbol.
         return await self.broker.resolve_equity(symbol.upper(), "NSE")
 
+    async def _resolve_bse_data(self, name: str):
+        """A BSE equity for candles: the engine's instrument when it carries a data key,
+        else with the key from the Upstox BSE master (or that master's instrument)."""
+        from .brokers import find_upstox
+
+        inst = None
+        error: BrokerError | None = None
+        try:
+            inst = await self.broker.resolve_equity(name, "BSE")
+        except BrokerError as exc:
+            error = exc
+        if inst is not None and inst.data_key:
+            return inst
+        up = find_upstox(self.broker)
+        if up is None:
+            if inst is not None:
+                return inst
+            raise error  # type: ignore[misc]
+        try:
+            bse = await up.lookup_equity(name, "BSE")
+        except BrokerError:
+            if inst is not None:
+                return inst
+            raise
+        return dataclasses.replace(inst, data_key=bse.data_key) if inst is not None else bse
+
     async def candles(self, symbol: str, timeframe: str, bars: int = DEFAULT_BARS) -> list[Bar]:
         minutes = tf_table.minutes_of(timeframe)
         if minutes is None:
@@ -547,7 +692,7 @@ class BrokerDataSource(DataSource):
             )
         if symbol.startswith("basket:"):
             return await self._basket_candles(symbol.split(":", 1)[1], timeframe, bars)
-        instrument = await self._resolve(symbol)
+        instrument = await self._resolve(symbol, for_data=True)
         series = await tf_table.load_series(self.broker, instrument, minutes, bars=bars)
         # The forming candle is kept here on purpose: a chart should show the bar
         # being built, unlike the strategy which only ever acts on closed bars.
@@ -615,7 +760,7 @@ class BrokerDataSource(DataSource):
                 "lot_size": 1,
                 "legs": [l.as_dict() for l in basket.legs],
             }
-        instrument = await self._resolve(symbol)
+        instrument = await self._resolve(symbol, for_data=True)
         return {
             "symbol": instrument.symbol,
             "display_name": instrument.display_name,

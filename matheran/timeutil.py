@@ -51,6 +51,17 @@ def session_close(segment: str, day: date) -> datetime:
     return datetime.combine(day, t, tzinfo=IST)
 
 
+_NEW_YORK = ZoneInfo("America/New_York")
+
+
+def mcx_close_time(day: date) -> time:
+    """MCX's close for internationally linked contracts: 23:30 IST while US daylight
+    saving is in effect (judged at noon New York time on `day`), else 23:55. Only a
+    fallback; SESSION_CLOSE["MCX_COMM"] stays 23:30 and agri contracts close earlier."""
+    noon = datetime.combine(day, time(12, 0), tzinfo=_NEW_YORK)
+    return time(23, 30) if noon.dst() else time(23, 55)
+
+
 def parse_hhmm(value: str) -> time:
     hh, mm = value.strip().split(":")[:2]
     return time(int(hh), int(mm))

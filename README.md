@@ -38,6 +38,7 @@ click through the whole UI before connecting an account. Everything is labelled
 .venv/bin/python run.py selfcheck                    # validate the indicator maths
 .venv/bin/python run.py doctor                       # config + broker connectivity
 .venv/bin/python run.py chain --underlying NIFTY     # print the scan table
+.venv/bin/python run.py scan --universe nifty50   # live BUY/SELL scanner
 .venv/bin/python run.py serve --port 8787            # API + console
 ```
 
@@ -169,7 +170,7 @@ Written to match TradingView (Pine v5), because that is probably what you are ey
 
 `run.py selfcheck` proves each of these against an independently written reference
 implementation plus invariants, along with the day, week and month bars, the zero-lag EMA,
-Heikin Ashi and Renko. 65 checks.
+Heikin Ashi and Renko. 80 checks.
 
 ---
 
@@ -233,6 +234,92 @@ load of a 17-strike chain makes about 70 requests and takes around 7 s. After th
 answers from the 45 s candle cache. Refreshing every 60 s uses about half of Upstox's
 2,000-requests-per-30-minutes allowance, so pick fewer strikes or 120 s if you also
 keep many charts open.
+
+---
+
+## Scanner
+
+The **Scanner** tab (and `run.py scan`) checks a universe of NSE/BSE stocks and MCX
+commodities against a BUY list of conditions and its mirror-image SELL list, on live data.
+It is read-only: it never places an order, creates an approval or adds a watch by itself.
+Each result row offers Chart and Watch (NSE/BSE equities; MCX gets Chart only).
+
+Default BUY conditions, all joined with AND (saved under `scanner:` in `config.yaml`):
+
+| # | Timeframe | Condition |
+|---|---|---|
+| 1 | 1W | RSI(14) at or above 50 |
+| 2 | 1D | price at or above EMA(200) |
+| 3 | 1D | price above Supertrend(21, 0.618) |
+| 4 | 2h | price above Supertrend(21, 0.618) |
+| 5 | 5m | price above Supertrend(21, 0.618) |
+| 6 | 15m | price above VWAP |
+| 7 | 15m | RSI(21) at or above EMA(RSI(21), 14) |
+
+SELL mirrors BUY with the exit-condition rules (above ↔ below, RSI levels reflected around
+50) and is read back in words. Unlink it to edit SELL on its own. Rows are edited with the
+Strategy tab's row builder plus a timeframe per row (1m 3m 5m 9m 15m 30m 1h 2h 1D 1W 1M).
+Each row is evaluated on the **live** forming candle by default, its close at the live price
+(as TradingView draws it), or on the **last closed** candle. A row without enough history is
+n/a and counts as not met.
+
+**Universes.** Nifty 50, Nifty Next 50, Nifty 200, Nifty 500, Midcap 150/100 and Smallcap
+250/100 come from NSE's archive CSVs (niftyindices.com as the fallback), fetched once per IST
+day into `cache/universes/`. Offline, the cached copy of any age is used, then the dated
+snapshot in `matheran/universe_snapshot/` (refresh it by copying the CSVs from
+`cache/universes/`). **F&O** is every stock with NSE stock futures in the Upstox master,
+scanned on its cash price. **MCX** is the near-month future of each commodity. Custom
+symbols take an exchange prefix (`RELIANCE`, `BSE:TCS`, `MCX:GOLD`, up to 200). Several
+selections are merged without duplicates.
+
+**Request budget.** Upstox allows about 2,000 requests per 30 minutes per IP. The scanner
+takes at most `max_requests_per_30min` (1,500) of them at `requests_per_second` (6), counted
+across the server and the CLI, and waits rather than exceed them. A symbol costs one request
+for today's bars plus one per history window. History is cached on disk per IST day (a
+window without the previous session, fetched before 09:00, is refetched after 30 minutes),
+so a repeat scan costs about one request per symbol, and none on a weekend or before the
+open. Evaluation `auto` checks every condition when the estimate fits 600 requests, else
+`lazy` stops at a symbol's first failed condition. Expected costs: Nifty 50 ≈ 200
+requests first scan, ≈ 50 repeat; Nifty 500 lazy ≈ 1,100–1,400 first, ≈ 500 repeat. A forced
+`complete` Nifty 500 scan needs about 2,000 and so takes about 30 minutes under the 1,500 cap.
+The estimate, progress, ETA and a Cancel are on screen. One scan runs at a time per machine.
+
+**Auto-rescan** (off by default) repeats the scan every 2–60 minutes while the console is
+open. Loading the page never starts it: it is armed by pressing Run, refused when the repeat
+cost would exceed the scanner cap, and stopped by Off, Cancel or closing the page.
+
+```bash
+.venv/bin/python run.py scan --universe nifty50 --side both --values
+.venv/bin/python run.py scan --universe nifty500 --universe mcx
+.venv/bin/python run.py scan --symbols NSE:RELIANCE,BSE:TCS,MCX:GOLD --all --json -
+```
+
+Limitations:
+
+- **MCX history:** a near-month contract has only its own short history (no continuous series
+  without Upstox Plus), so `[1D] EMA(200)` is n/a for every contract and no MCX commodity
+  matches the default rows.
+- After 15:30 the daily forming bar closes at the last traded price, not the official close.
+  Exchange holidays are not modelled.
+- The scanner counts its own requests across processes sharing `cache/scan/`, but not the
+  engine and chart requests of another process or other apps on the same IP.
+- BSE watches on Upstox data still get no candles (unchanged engine); the scanner and charts
+  use a data-only BSE path.
+- Live quotes need a valid Upstox token (or Dhan as the NSE data broker). With an expired
+  token the scan uses candle closes and says so. Any other data path (Stoxkart today) is
+  scanned on candle closes, and Stoxkart without its own data broker cannot be scanned.
+- REITs in the index lists are scanned but cannot be charted or watched; a renamed index
+  member is scanned under its current symbol (matched by ISIN), with a note.
+- The cache in a cloud-synced folder: see below.
+
+### Where the cache lives
+
+`cache/` (the scanner's history windows, `cache/scan/`, plus the instrument masters) sits
+next to `run.py`. If the project folder is synced by OneDrive, iCloud Drive or Dropbox,
+exclude `cache/` from sync, or run Matheran from a non-synced directory. A first scan of the
+day writes about 1,000–1,500 small files there, and a running scan refreshes
+`cache/scan/.running` every 2 s and `cache/scan/ledger.json` every 10 s. The app logs a
+notice when it detects this.
 
 ---
 
@@ -528,7 +615,7 @@ algo-ID registration, which is between you and your broker.
 ## Layout
 
 ```
-run.py                      CLI: serve / selfcheck / doctor / chain
+run.py                      CLI: serve / selfcheck / doctor / chain / scan
 config.example.yaml          copy to config.yaml (the UI writes this file)
 .env.example                 copy to .env (or let the UI create it)
 matheran/
@@ -540,6 +627,10 @@ matheran/
   rules.py                   exit conditions as rows: catalog, validation, mirroring, evaluation
   engine.py                  per-watch state machine, approvals, stops, trailing, GTT, square-off, reconciliation
   options.py                 ATM/OTM chain selection and the scan table
+  scanner.py                 the live BUY/SELL scanner: rows per timeframe, plan, evaluation, scan jobs
+  scan_data.py               scanner data: targets, the disk history cache, request budget, quotes, run lock
+  universes.py               scanner universes: index lists (allowlisted NSE sources), custom symbols
+  universe_snapshot/         dated offline copy of the eight index CSVs, with manifest.json
   settings.py                .env and config.yaml management, secret masking
   data_source.py             pluggable chart feeds — add a broker by adding one class
   api.py                     FastAPI routes
@@ -565,12 +656,12 @@ matheran/
 
 ## Verification
 
-`run.py selfcheck` ships with the project (65 checks). During development the engine,
+`run.py selfcheck` ships with the project (80 checks). During development the engine,
 HTTP and settings layers were also verified and all passed:
 
 | Suite | Checks | Covers |
 |---|---|---|
-| selfcheck | 65 | indicators vs an independent reference implementation (ZEMA included), resampling into minutes, hours, days, weeks and months, bar close times, Heikin Ashi, Renko, basket premium weights, tick rounding, 3% stop maths, VWAP with and without volume, strategy wiring |
+| selfcheck | 80 | indicators vs an independent reference implementation (ZEMA included), resampling into minutes, hours, days, weeks and months, bar close times, Heikin Ashi, Renko, basket premium weights, tick rounding, 3% stop maths, VWAP with and without volume, strategy wiring, scanner rows, mirroring, sessions, cache reuse and the request budget |
 | engine | 62 | full lifecycle, target/stop/indicator/square-off exits, approval expiry, rejection, market-hours and daily caps, halt, broker-stop failure, restart adoption, persistence |
 | api | 74 | auth, watch CRUD, diagnostics, options chain shape, option lot sizing, approvals, controls |
 | settings | 83 | `.env` parsing and 0600 permissions, masking, clear-vs-untouched semantics, config validation and rollback, live-mode guard, key generation taking effect immediately, broker swap refusal while in position |

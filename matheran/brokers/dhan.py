@@ -11,6 +11,7 @@ import asyncio
 import csv
 import io
 import logging
+import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -555,6 +556,83 @@ class DhanBroker(Broker):
             cur = piece_end + timedelta(days=1)
         out.sort(key=lambda c: c.ts)
         return CandleSeries(out)
+
+    # ---- scanner data (read-only; the engine's caches are never written) ----
+    async def today_candles(
+        self, instrument: Instrument, interval_minutes: int = 1, *, day: date | None = None
+    ) -> CandleSeries:
+        """1-minute candles of `day`'s session only (default: today in IST), from one
+        POST /charts/intraday through the data bucket. Reuses an entry the engine
+        fetched in the last 45 s but never writes _candle_cache; the caller resamples."""
+        today = day or now_ist().date()
+        now = now_ist()
+        cached = self._candle_cache.get((instrument.segment, instrument.security_id, 1))
+        if cached and (now - cached[0]).total_seconds() < 45:
+            return CandleSeries([c for c in cached[1].candles if c.ts.date() == today])
+
+        from_dt = session_open(instrument.segment, today)
+        to_dt = min(now, session_close(instrument.segment, today))
+        if to_dt <= from_dt:
+            to_dt = session_close(instrument.segment, today)
+        payload = {
+            "securityId": instrument.security_id,
+            "exchangeSegment": instrument.segment,
+            "instrument": instrument.instrument_type,
+            "interval": "1",
+            "oi": instrument.segment in {"NSE_FNO", "BSE_FNO", "MCX_COMM"},
+            "fromDate": from_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "toDate": to_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        data = await self._request("POST", "/charts/intraday", json=payload, bucket="data")
+        if not isinstance(data, dict):
+            raise BrokerError("unexpected /charts/intraday response")
+        series = build_candles(
+            timestamps=data.get("timestamp") or [],
+            open_=data.get("open") or [],
+            high=data.get("high") or [],
+            low=data.get("low") or [],
+            close=data.get("close") or [],
+            volume=data.get("volume") or [],
+            segment=instrument.segment,
+            open_interest=data.get("open_interest") or [],
+        )
+        return CandleSeries([c for c in series.candles if c.ts.date() == today])
+
+    async def history_window(
+        self, instrument: Instrument, interval_minutes: int, start: date, end: date
+    ) -> CandleSeries:
+        """history_candles for one window without touching the engine's _history_cache."""
+        if end < start:
+            return CandleSeries([])
+        return await self._fetch_history(instrument, interval_minutes, start, end)
+
+    async def quote_ltp(self, instruments: list[Instrument]) -> dict[str, float]:
+        """Last traded price keyed f"{segment}:{security_id}", from exactly one POST
+        /marketfeed/ltp through the quote bucket. At most 1,000 instruments (ValueError
+        above that; the caller batches). No cache, no fallback, no settling of anything:
+        whatever _request raises propagates."""
+        if len(instruments) > 1000:
+            raise ValueError(f"quote_ltp takes at most 1,000 instruments, got {len(instruments)}")
+        by_segment: dict[str, list[int]] = {}
+        for inst in instruments:
+            try:
+                by_segment.setdefault(inst.segment, []).append(int(inst.security_id))
+            except (TypeError, ValueError):
+                continue  # not a Dhan id: no quote for it
+        if not by_segment:
+            return {}
+        data = await self._request("POST", "/marketfeed/ltp", json=by_segment, bucket="quote")
+        out: dict[str, float] = {}
+        entries_by_segment = (data.get("data") or {}) if isinstance(data, dict) else {}
+        if not isinstance(entries_by_segment, dict):
+            return out
+        for segment, entries in entries_by_segment.items():
+            for sid, payload in (entries.items() if isinstance(entries, dict) else ()):
+                price = payload.get("last_price") if isinstance(payload, dict) else None
+                if (isinstance(price, (int, float)) and not isinstance(price, bool)
+                        and math.isfinite(price) and price > 0):
+                    out[f"{segment}:{sid}"] = float(price)
+        return out
 
     async def ltp(self, instruments: list[Instrument]) -> dict[str, float]:
         if not instruments:

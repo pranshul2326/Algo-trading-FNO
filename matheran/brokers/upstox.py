@@ -24,19 +24,22 @@ execution broker via CompositeBroker.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import gzip
 import json
 import logging
+import math
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
 import httpx
 
-from ..candles import Candle, CandleSeries
+from ..candles import DAY, Candle, CandleSeries
 from ..models import Instrument
-from ..ratelimit import TokenBucket
-from ..timeutil import IST, now_ist, previous_trading_day, session_open, to_ist
+from ..ratelimit import RequestLedger, TokenBucket
+from ..timeutil import IST, mcx_close_time, now_ist, previous_trading_day, session_open, to_ist
 from .base import Broker, BrokerError, BrokerPosition, OrderState, PlacedOrder
 
 log = logging.getLogger(__name__)
@@ -45,6 +48,7 @@ API_BASE = "https://api.upstox.com"
 INSTRUMENT_URLS = {
     "NSE": "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
     "BSE": "https://assets.upstox.com/market-quote/instruments/exchange/BSE.json.gz",
+    "MCX": "https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz",
 }
 
 # Upstox segment -> the engine's segment vocabulary (which follows Dhan's).
@@ -64,6 +68,48 @@ TOKEN_NAMESPACES = {"NSE_EQ", "NSE_FNO", "BSE_EQ", "BSE_FNO"}
 
 OPTION_TYPES = {"CE", "PE"}
 EQUITY_TYPES = {"EQ", "BE"}
+# The BSE master files cash equities under their BSE group as instrument_type.
+BSE_EQUITY_GROUPS = {"A", "B", "T", "X", "XT", "Z", "ZP", "M", "MS", "MT", "P", "TS"}
+
+# Request accounting. Every HTTP request to the Upstox API is recorded in
+# UPSTOX_REQUESTS (shared by every UpstoxData in the process) under REQUEST_TAG's
+# value ("app" unless a scan sets its own), and counted in REQUEST_COUNTER's list
+# when a budgeted scanner call has set one.
+REQUEST_TAG: ContextVar[str] = ContextVar("upstox_request_tag", default="app")
+REQUEST_COUNTER: ContextVar[list[int] | None] = ContextVar("upstox_request_counter", default=None)
+UPSTOX_REQUESTS = RequestLedger(1800.0)
+# Months one historical request may span: up to 15-minute candles, and longer ones.
+SPAN_MONTHS = {"short": 1, "long": 3}
+DAY_SPAN_DAYS = 3649          # a daily request covers [to - 3,649 days, to]
+
+
+def months_back(day: date, months: int) -> date:
+    """The same day of the month `months` earlier, clamped to that month's length:
+    months_back(2026-03-31, 1) = 2026-02-28."""
+    index = day.year * 12 + (day.month - 1) - int(months)
+    year, month = divmod(index, 12)
+    month += 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def request_pieces(interval_minutes: int, start: date, end: date) -> list[tuple[date, date]]:
+    """Fewest (from, to) pieces Upstox accepts for [start, end], newest piece first:
+    DAY: from >= to - 3,649 days; <= 15 min: from >= months_back(to, 1);
+    > 15 min: from >= months_back(to, 3). Each piece starts at max(start, that bound);
+    the next piece ends the day before."""
+    out: list[tuple[date, date]] = []
+    to = end
+    while to >= start:
+        if interval_minutes >= DAY:
+            bound = to - timedelta(days=DAY_SPAN_DAYS)
+        elif interval_minutes <= 15:
+            bound = months_back(to, SPAN_MONTHS["short"])
+        else:
+            bound = months_back(to, SPAN_MONTHS["long"])
+        frm = max(start, bound)
+        out.append((frm, to))
+        to = frm - timedelta(days=1)
+    return out
 
 # A browser-ish agent: the asset host rejects some default clients.
 HEADERS = {
@@ -86,9 +132,12 @@ def _ms_to_date(value) -> str | None:
 class UpstoxInstruments:
     """The BOD instrument dump, filtered and indexed. Refreshed once a day."""
 
-    def __init__(self, cache_dir: Path, exchanges: tuple[str, ...] = ("NSE",)):
+    def __init__(
+        self, cache_dir: Path, exchanges: tuple[str, ...] = ("NSE",), *, keep_options: bool = True
+    ):
         self.cache_dir = Path(cache_dir)
         self.exchanges = exchanges
+        self.keep_options = keep_options
         self.equities: dict[tuple[str, str], Instrument] = {}
         self.indices: dict[str, Instrument] = {}
         self.options: dict[str, list[Instrument]] = {}
@@ -165,6 +214,16 @@ class UpstoxInstruments:
                 key = str(row.get("instrument_key") or "")
                 symbol = str(row.get("trading_symbol") or "")
                 if not key or not symbol:
+                    continue
+                if up_segment == "BSE_EQ":
+                    # Cash equities are filed under their BSE group; the rest (F, G,
+                    # IF, E, R: debt, ETFs and others) are not equities.
+                    if itype not in EQUITY_TYPES and itype not in BSE_EQUITY_GROUPS:
+                        continue
+                    itype = "EQ"
+                elif up_segment == "MCX_FO" and itype.startswith("FUT"):
+                    itype = "FUTCOM" if str(row.get("underlying_type") or "") == "COM" else "FUTIDX"
+                if not self.keep_options and itype in OPTION_TYPES:
                     continue
 
                 token = str(row.get("exchange_token") or "")
@@ -248,6 +307,11 @@ class UpstoxData(Broker):
         self._bucket = TokenBucket(10, burst=10, name="upstox")
         self._candle_cache: dict[str, tuple[datetime, CandleSeries]] = {}
         self._history_cache: dict[tuple[str, str, str], list[Candle]] = {}
+        # BSE / MCX masters, loaded only when the scanner or the charts need them.
+        self._extra: dict[str, UpstoxInstruments] = {}
+        self._extra_lock = asyncio.Lock()
+        # The scanner's today fetches, keyed (instrument key, step): 45 s TTL.
+        self._today_cache: dict[tuple[str, int], tuple[datetime, CandleSeries]] = {}
 
     @property
     def data_source(self) -> str:
@@ -275,6 +339,11 @@ class UpstoxData(Broker):
         last: Exception | None = None
         for attempt in range(attempts):
             await self._bucket.acquire()
+            # Recorded and counted together, with no await in between.
+            UPSTOX_REQUESTS.record(REQUEST_TAG.get())
+            counter = REQUEST_COUNTER.get()
+            if counter is not None:
+                counter[0] += 1
             try:
                 resp = await self.client.get(path, params=params)
                 break
@@ -306,11 +375,13 @@ class UpstoxData(Broker):
                     f"LTP quotes do - generate a fresh token on the Upstox developer apps "
                     f"page or clear it to fall back to 1-minute closes. ({code})",
                     code=code or "401",
+                    status=resp.status_code,
                 )
             raise BrokerError(
                 f"Upstox {path} failed ({resp.status_code} {code}): {message}",
                 code=code,
                 retryable=resp.status_code == 429 or resp.status_code >= 500,
+                status=resp.status_code,
             )
         return payload if isinstance(payload, dict) else {}
 
@@ -325,6 +396,7 @@ class UpstoxData(Broker):
             "equities": len(self.instruments.equities),
             "option_underlyings": len(self.instruments.options),
             "instruments_loaded_for": str(self.instruments.loaded_for),
+            "extra_masters": sorted(self._extra),
         }
 
     # ------------------------------------------------------------ instruments
@@ -406,6 +478,75 @@ class UpstoxData(Broker):
             f"id={instrument.security_id}) to an Upstox instrument key"
         )
 
+    # ------------------------------------------- extra masters (data-only lookups)
+    async def exchange_instruments(self, exchange: str) -> UpstoxInstruments:
+        """The instrument master of one exchange. NSE is the engine's own; BSE and MCX
+        are loaded lazily (without options) the first time something asks for them."""
+        exchange = str(exchange or "").upper()
+        if exchange == "NSE":
+            await self.instruments.ensure(self.client)
+            return self.instruments
+        if exchange not in {"BSE", "MCX"}:
+            raise BrokerError(f"unknown exchange {exchange!r}: use NSE, BSE or MCX")
+        async with self._extra_lock:
+            holder = self._extra.get(exchange)
+            if holder is None:
+                holder = UpstoxInstruments(
+                    self.instruments.cache_dir, (exchange,), keep_options=False
+                )
+                self._extra[exchange] = holder
+        await holder.ensure(self.client)
+        return holder
+
+    async def lookup_equity(self, symbol: str, exchange: str = "NSE") -> Instrument:
+        """A cash equity with its data_key set, for the scanner and the charts' data
+        path; never used by the engine (resolve_equity is the engine's path)."""
+        exchange = str(exchange or "").upper()
+        if exchange not in {"NSE", "BSE"}:
+            raise BrokerError(f"unknown cash exchange {exchange!r}: use NSE or BSE")
+        holder = await self.exchange_instruments(exchange)
+        inst = holder.equities.get((exchange, str(symbol).upper()))
+        if inst is None:
+            raise BrokerError(f"{symbol} not found in the Upstox {exchange} cash segment")
+        return inst
+
+    @staticmethod
+    def _near_month(rows: list[Instrument]) -> list[Instrument]:
+        """The rows of the nearest MCX expiry still trading (DST-aware close)."""
+        from ..options import active_expiries
+
+        today = now_ist().date()
+        live = active_expiries(
+            [r.expiry for r in rows if r.expiry], "MCX_COMM", close_time=mcx_close_time(today)
+        )
+        if not live:
+            return []
+        return [r for r in rows if r.expiry == live[0]]
+
+    async def resolve_commodity(self, underlying: str, expiry: str | None = None) -> Instrument:
+        """An MCX future of `underlying`: the near month, or the given expiry."""
+        holder = await self.exchange_instruments("MCX")
+        name = str(underlying or "").upper()
+        rows = holder.futures.get(name, [])
+        if expiry:
+            rows = [r for r in rows if r.expiry == expiry]
+        else:
+            rows = self._near_month(rows)
+        if not rows:
+            raise BrokerError(f"no live MCX future for {underlying}")
+        return rows[0]
+
+    async def commodity_underlyings(self) -> list[Instrument]:
+        """One near-month commodity future (FUTCOM) per MCX underlying, by name."""
+        holder = await self.exchange_instruments("MCX")
+        out: list[Instrument] = []
+        for name in sorted(holder.futures):
+            rows = [r for r in holder.futures[name] if r.instrument_type == "FUTCOM"]
+            near = self._near_month(rows)
+            if near:
+                out.append(near[0])
+        return out
+
     # ----------------------------------------------------------- market data
     @staticmethod
     def _rows_to_candles(rows) -> list[Candle]:
@@ -435,17 +576,29 @@ class UpstoxData(Broker):
         return self._rows_to_candles((data.get("data") or {}).get("candles"))
 
     async def _history(
-        self, key: str, minutes: int, from_day: date, to_day: date, unit: str = "minutes"
+        self,
+        key: str,
+        minutes: int,
+        from_day: date,
+        to_day: date,
+        unit: str = "minutes",
+        *,
+        cache: bool = True,
+        attempts: int = 3,
     ) -> list[Candle]:
+        """With cache=False (the scanner's windows) the in-memory history cache is
+        neither read nor written, so a scan cannot evict the engine's entries."""
         cache_key = (key, f"{unit}/{minutes}", from_day.isoformat(), to_day.isoformat())
-        if cache_key in self._history_cache:
+        if cache and cache_key in self._history_cache:
             return self._history_cache[cache_key]
         path = (
             f"/v3/historical-candle/{quote(key, safe='')}/{unit}/{minutes}"
             f"/{to_day.isoformat()}/{from_day.isoformat()}"
         )
-        data = await self._get(path)
+        data = await self._get(path, attempts=attempts)
         candles = self._rows_to_candles((data.get("data") or {}).get("candles"))
+        if not cache:
+            return candles
         # Closed sessions never change, so this can be cached for the whole run.
         self._history_cache[cache_key] = candles
         if len(self._history_cache) > 512:
@@ -607,6 +760,150 @@ class UpstoxData(Broker):
                 inst = token_to_inst.get(token.split("|")[-1])
                 if inst is not None and price:
                     out[inst.security_id] = float(price)
+        return out
+
+    # ------------------------------------------------- scanner market data
+    TODAY_TTL_SECONDS = 45
+    TODAY_CACHE_MAX = 2000
+
+    @staticmethod
+    def _dedupe(candles: list[Candle]) -> list[Candle]:
+        candles.sort(key=lambda c: c.ts)
+        out: list[Candle] = []
+        for c in candles:
+            if out and out[-1].ts == c.ts:
+                out[-1] = c
+            else:
+                out.append(c)
+        return out
+
+    def _prune_today_cache(self, now: datetime) -> None:
+        cache = self._today_cache
+        if len(cache) <= self.TODAY_CACHE_MAX:
+            return
+        for k in [k for k, (at, _) in cache.items()
+                  if (now - at).total_seconds() >= self.TODAY_TTL_SECONDS]:
+            del cache[k]
+        while len(cache) > self.TODAY_CACHE_MAX:
+            del cache[min(cache, key=lambda k: cache[k][0])]
+
+    async def today_candles(
+        self, instrument: Instrument, interval_minutes: int = 1, *, day: date | None = None
+    ) -> CandleSeries:
+        """Today's candles, the forming one included, in one request: at the coarsest of
+        30, 15, 5 or 1 minutes that divides interval_minutes (the intervals the intraday
+        endpoint serves), or one session candle (days/1) when interval_minutes >= DAY.
+        The caller resamples. Only bars dated `day` (default today in IST) are returned,
+        so a weekend or holiday answer is never mistaken for today. The engine's
+        candle cache is reused when fresh but never written; a single attempt."""
+        key = await self.data_key_for(instrument)
+        interval = int(interval_minutes)
+        if interval >= DAY:
+            step = DAY
+        else:
+            step = max(s for s in (30, 15, 5, 1) if interval % s == 0)
+        target = day or now_ist().date()
+        now = now_ist()
+
+        def of_day(series: CandleSeries) -> CandleSeries:
+            return CandleSeries([c for c in series.candles if c.ts.date() == target])
+
+        engine = self._candle_cache.get(f"{key}:{step}")
+        if engine and (now - engine[0]).total_seconds() < self.TODAY_TTL_SECONDS:
+            return of_day(engine[1])
+        mine = self._today_cache.get((key, step))
+        if mine and (now - mine[0]).total_seconds() < self.TODAY_TTL_SECONDS:
+            return of_day(mine[1])
+
+        unit = "days/1" if step >= DAY else f"minutes/{step}"
+        path = f"/v3/historical-candle/intraday/{quote(key, safe='')}/{unit}"
+        data = await self._get(path, attempts=1)
+        candles = self._rows_to_candles((data.get("data") or {}).get("candles"))
+        if step >= DAY:
+            candles = [
+                Candle(ts=session_open(instrument.segment, c.ts.date()), open=c.open,
+                       high=c.high, low=c.low, close=c.close, volume=c.volume, oi=c.oi)
+                for c in candles
+            ]
+        series = CandleSeries(self._dedupe(candles))
+        self._today_cache[(key, step)] = (now, series)
+        self._prune_today_cache(now)
+        return of_day(series)
+
+    async def history_window(
+        self, instrument: Instrument, interval_minutes: int, start: date, end: date
+    ) -> CandleSeries:
+        """Completed sessions of [start, end] in the fewest pieces Upstox accepts
+        (request_pieces), newest first, one attempt each, bypassing the in-memory
+        history cache. Any error on a piece propagates, so a window never comes back
+        with a silent hole (history_candles, the engine's path, skips and logs)."""
+        if end < start:
+            return CandleSeries([])
+        key = await self.data_key_for(instrument)
+        interval = int(interval_minutes)
+        daily = interval >= DAY
+        candles: list[Candle] = []
+        for a, b in request_pieces(interval, start, end):
+            if daily:
+                rows = await self._history(key, 1, a, b, unit="days", cache=False, attempts=1)
+                candles.extend(
+                    Candle(ts=session_open(instrument.segment, c.ts.date()), open=c.open,
+                           high=c.high, low=c.low, close=c.close, volume=c.volume, oi=c.oi)
+                    for c in rows
+                )
+            else:
+                candles.extend(
+                    await self._history(key, interval, a, b, cache=False, attempts=1)
+                )
+        return CandleSeries(self._dedupe(candles))
+
+    async def quote_ltp(self, instruments: list[Instrument]) -> dict[str, float]:
+        """Last traded price keyed by the full Upstox instrument key, from
+        /v3/market-quote/ltp only.
+
+        One HTTP request (a single attempt), at most 400 instruments (ValueError above
+        that; the caller batches). Never falls back to candles and never touches the
+        candle or history caches. Raises BrokerError: no token (code NO_TOKEN, before
+        any request), 401 (expired or invalid token), 429 and 5xx (retryable), network
+        errors.
+
+        Matching: an entry's instrument_token is documented as the full key, so it is
+        matched exactly first; otherwise on (segment of the answer's key, the token's
+        part after "|"), which keeps NSE_EQ|INE... and BSE_EQ|INE... apart.
+        """
+        if len(instruments) > 400:
+            raise ValueError(f"quote_ltp takes at most 400 instruments, got {len(instruments)}")
+        if not self.access_token:
+            raise BrokerError(
+                "live quotes need an Upstox access token; prices come from the candles",
+                code="NO_TOKEN",
+            )
+        if not instruments:
+            return {}
+        keys = [await self.data_key_for(i) for i in instruments]
+        data = await self._get(
+            "/v3/market-quote/ltp", params={"instrument_key": ",".join(keys)}, attempts=1
+        )
+        wanted = set(keys)
+        by_suffix = {(k.split("|")[0], k.split("|")[-1]): k for k in keys}
+        entries = data.get("data") if isinstance(data, dict) else None
+        out: dict[str, float] = {}
+        for answer_key, entry in (entries.items() if isinstance(entries, dict) else ()):
+            if not isinstance(entry, dict):
+                continue
+            token = str(entry.get("instrument_token") or "")
+            key = token if token in wanted else by_suffix.get(
+                (str(answer_key).split(":")[0], token.split("|")[-1])
+            )
+            price = entry.get("last_price")
+            if (
+                key
+                and isinstance(price, (int, float))
+                and not isinstance(price, bool)
+                and math.isfinite(price)
+                and price > 0
+            ):
+                out[key] = float(price)
         return out
 
     # --------------------------------------------------------------- trading

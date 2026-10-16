@@ -343,6 +343,7 @@ class SettingsManager:
             "strategy": _dump(c.strategy),
             "risk": _dump(c.risk),
             "options": _dump(c.options),
+            "scanner": _dump(c.scanner),
             "warmup_bars": c.strategy.warmup_bars(),
             "config_file": str(self.config_path.resolve()),
         }
@@ -356,6 +357,7 @@ class SettingsManager:
             "strategy": self.cfg.strategy,
             "risk": self.cfg.risk,
             "options": self.cfg.options,
+            "scanner": self.cfg.scanner,
         }
         before = {name: _dump(obj) for name, obj in sections.items()}
         before_mode = self.cfg.mode
