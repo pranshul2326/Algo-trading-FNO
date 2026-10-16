@@ -839,6 +839,36 @@ def create_app(
         )
         return await oi_chain(engine.broker, chain, window_minutes=window)
 
+    @app.get("/api/options/straddles", tags=["options"], dependencies=auth)
+    async def option_straddles(
+        underlying: str = Query(None),
+        expiry: str | None = Query(None, description="YYYY-MM-DD; empty for nearest"),
+        timeframe_minutes: int = Query(1),
+    ):
+        """ATM plus seven strikes on each side as paired CE+PE premiums.
+
+        Change is against the previous session close. VWAP, EMA(21), and
+        Supertrend(21, 0.618) are calculated on closed straddle candles.
+        """
+        from .options import STRADDLE_STRIKES_EACH_SIDE, straddle_table
+
+        if timeframe_minutes not in timeframes.MINUTES:
+            raise HTTPException(
+                400,
+                "unsupported timeframe. Available minutes: "
+                + ", ".join(str(value) for value in timeframes.MINUTES),
+            )
+        name = (underlying or cfg.options.default_underlying).upper()
+        chain = await select_full_chain(
+            engine.broker,
+            name,
+            expiry=expiry,
+            strikes_each_side=STRADDLE_STRIKES_EACH_SIDE,
+        )
+        return await straddle_table(
+            engine.broker, chain, timeframe_minutes=timeframe_minutes
+        )
+
     @app.get("/api/options/chain", tags=["options"], dependencies=auth)
     async def option_chain(
         underlying: str = Query(None),

@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Iterable
 
 from .brokers.base import Broker, BrokerError
@@ -16,7 +16,7 @@ from .candles import CandleSeries
 from .models import Instrument, OiStats, OptionRow, Snapshot
 from .strategy import Indicators, evaluate_entry
 from .timeframes import load_series
-from .timeutil import now_ist, session_close
+from .timeutil import IST, now_ist, session_close
 
 log = logging.getLogger(__name__)
 
@@ -532,4 +532,209 @@ async def oi_chain(
         "totals": totals,
         "as_of": as_of,
         "errors": sum(1 for _, raw, err in fetched if err),
+    }
+
+# ------------------------------------------------------------ straddle table
+STRADDLE_STRIKES_EACH_SIDE = 7
+
+
+async def straddle_table(
+    broker: Broker,
+    chain: FullChain,
+    *,
+    timeframe_minutes: int = 1,
+    day: date | None = None,
+) -> dict:
+    """ATM +/- seven paired CE+PE premiums with change and combo indicators.
+
+    Change is measured against the previous session's final CE+PE closes. VWAP,
+    EMA and Supertrend are calculated on closed combined-premium candles; their
+    relation is evaluated against the current CE+PE quote (or latest leg closes
+    when quotes are unavailable).
+    """
+    # Local imports avoid making the lightweight option-selection helpers load the
+    # chart stack unless this table is actually requested.
+    from .combo import ComboLeg, align, combo_bars, combo_indicators
+    from .data_source import Bar
+
+    day = day or now_ist().date()
+    now = now_ist()
+    instruments = list(chain.contracts.values())
+    sem = asyncio.Semaphore(CHAIN_CONCURRENT_FETCHES)
+
+    async def fetch(inst: Instrument):
+        raw: CandleSeries | None = None
+        try:
+            async with sem:
+                raw = await broker.intraday_candles(inst, day, 1)
+                if timeframe_minutes >= 60:
+                    series = await load_series(
+                        broker, inst, timeframe_minutes, bars=150, now=now
+                    )
+                else:
+                    series = resample(raw, timeframe_minutes, inst.segment)
+            closed, _forming = drop_forming(
+                series, timeframe_minutes, now, inst.segment
+            )
+            return inst, raw, closed, ""
+        except BrokerError as exc:
+            return inst, raw, CandleSeries([]), str(exc)
+
+    fetched = await asyncio.gather(*(fetch(inst) for inst in instruments))
+    records = {
+        inst.security_id: {"raw": raw, "closed": closed, "error": error}
+        for inst, raw, closed, error in fetched
+    }
+
+    try:
+        prices = await broker.ltp(instruments)
+    except BrokerError as exc:
+        log.warning("options: straddle LTP batch failed (%s), using candle closes", exc)
+        prices = {}
+
+    def current_price(inst: Instrument | None) -> float | None:
+        if inst is None:
+            return None
+        quoted = prices.get(inst.security_id)
+        if quoted is not None and quoted > 0:
+            return float(quoted)
+        record = records.get(inst.security_id, {})
+        raw = record.get("raw")
+        if raw and raw.last:
+            return float(raw.last.close)
+        closed = record.get("closed")
+        return float(closed.last.close) if closed and closed.last else None
+
+    def previous_close(inst: Instrument | None) -> float | None:
+        if inst is None:
+            return None
+        raw = records.get(inst.security_id, {}).get("raw")
+        if not raw or not raw.last:
+            return None
+        latest_session = raw.last.ts.date()
+        earlier = [c for c in raw.candles if c.ts.date() < latest_session]
+        return float(earlier[-1].close) if earlier else None
+
+    def bars(series: CandleSeries) -> list[Bar]:
+        return [
+            Bar(
+                time=int(c.ts.timestamp()), open=c.open, high=c.high, low=c.low,
+                close=c.close, volume=c.volume, oi=c.oi,
+            )
+            for c in series.candles
+        ]
+
+    def relation(price: float | None, level: float | None) -> str | None:
+        if price is None or level is None:
+            return None
+        if abs(price - level) < 1e-9:
+            return "at"
+        return "above" if price > level else "below"
+
+    rows = []
+    as_of: str | None = None
+    for strike in chain.strikes:
+        ce = chain.contracts.get((strike, "CE"))
+        pe = chain.contracts.get((strike, "PE"))
+        errors = []
+        if ce is None:
+            errors.append("CE contract is not listed")
+        if pe is None:
+            errors.append("PE contract is not listed")
+        for inst in (ce, pe):
+            if inst is not None:
+                error = records.get(inst.security_id, {}).get("error", "")
+                if error:
+                    errors.append(f"{inst.option_type}: {error}")
+
+        ce_price = current_price(ce)
+        pe_price = current_price(pe)
+        price = ce_price + pe_price if ce_price is not None and pe_price is not None else None
+        ce_previous = previous_close(ce)
+        pe_previous = previous_close(pe)
+        previous = (
+            ce_previous + pe_previous
+            if ce_previous is not None and pe_previous is not None else None
+        )
+        change = price - previous if price is not None and previous and previous > 0 else None
+        change_pct = change / previous * 100.0 if change is not None and previous else None
+
+        combined = []
+        indicators: dict[str, list[dict]] = {}
+        if ce is not None and pe is not None:
+            ce_series = records.get(ce.security_id, {}).get("closed")
+            pe_series = records.get(pe.security_id, {}).get("closed")
+            ce_bars = bars(ce_series) if ce_series else []
+            pe_bars = bars(pe_series) if pe_series else []
+            if ce_bars and pe_bars:
+                legs = [
+                    ComboLeg(ce.symbol, ce.symbol, 1, 1.0, option_type="CE", strike=strike),
+                    ComboLeg(pe.symbol, pe.symbol, 1, 1.0, option_type="PE", strike=strike),
+                ]
+                first_paired_time = max(ce_bars[0].time, pe_bars[0].time)
+                combined = [
+                    bar for bar in combo_bars(legs, align([ce_bars, pe_bars]), "spot")
+                    if bar.time >= first_paired_time
+                ]
+                indicators = combo_indicators(
+                    combined, ema1=21, ema2=21, st_factor=0.618, st_atr=21
+                )
+
+        def latest(name: str) -> dict | None:
+            points = indicators.get(name) or []
+            return points[-1] if points else None
+
+        vwap_point = latest("vwap")
+        ema_point = latest("ema2")
+        st_point = latest("supertrend")
+        vwap = float(vwap_point["value"]) if vwap_point else None
+        ema_21 = float(ema_point["value"]) if ema_point else None
+        supertrend_value = float(st_point["value"]) if st_point else None
+        supertrend_direction = int(st_point["trend"]) if st_point else None
+        supertrend_trend = (
+            "positive" if supertrend_direction == -1
+            else "negative" if supertrend_direction == 1 else None
+        )
+        last_candle = (
+            datetime.fromtimestamp(combined[-1].time, IST).isoformat() if combined else None
+        )
+        if last_candle and (as_of is None or last_candle > as_of):
+            as_of = last_candle
+
+        rows.append({
+            "strike": strike,
+            "atm": strike == chain.atm_strike,
+            "ce_ltp": round(ce_price, 2) if ce_price is not None else None,
+            "pe_ltp": round(pe_price, 2) if pe_price is not None else None,
+            "straddle_price": round(price, 2) if price is not None else None,
+            "previous_close": round(previous, 2) if previous is not None else None,
+            "change_price": round(change, 2) if change is not None else None,
+            "change_pct": round(change_pct, 2) if change_pct is not None else None,
+            "vwap": round(vwap, 2) if vwap is not None else None,
+            "vwap_position": relation(price, vwap),
+            "supertrend": round(supertrend_value, 2) if supertrend_value is not None else None,
+            "supertrend_direction": supertrend_direction,
+            "supertrend_trend": supertrend_trend,
+            "ema_21": round(ema_21, 2) if ema_21 is not None else None,
+            "ema_21_position": relation(price, ema_21),
+            "last_candle": last_candle,
+            "error": "; ".join(errors),
+        })
+
+    requested_rows = STRADDLE_STRIKES_EACH_SIDE * 2 + 1
+    return {
+        "underlying": chain.underlying,
+        "expiry": chain.expiry,
+        "expiries": chain.expiries,
+        "reference_symbol": chain.reference_symbol,
+        "spot": round(chain.spot, 2),
+        "atm_strike": chain.atm_strike,
+        "strike_step": chain.strike_step,
+        "timeframe_minutes": timeframe_minutes,
+        "strikes_each_side": STRADDLE_STRIKES_EACH_SIDE,
+        "requested_rows": requested_rows,
+        "expires_today": chain.expires_today,
+        "rows": rows,
+        "as_of": as_of,
+        "errors": sum(1 for row in rows if row["error"]),
     }

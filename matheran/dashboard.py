@@ -309,40 +309,81 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   <!-- ============================= OPTIONS ============================= -->
   <div role="tabpanel" id="p-options" aria-labelledby="tab-options" hidden>
-    <section class="panel">
-      <h2>ATM and OTM scan</h2>
-      <p class="sub">Current price, VWAP, RSI(21), EMA(RSI,21), EMA(21), Supertrend(21, 0.618)
-        and ADX for the ATM strike plus OTM strikes on both sides. Rows highlighted green
-        meet every entry condition. For open interest, OI change and the 5-minute buildup on
-        every strike, open the <a href="/chain">full option chain ↗</a>.</p>
-      <form class="row" id="chainForm">
-        <label class="f" for="und">Underlying
-          <select id="und"><option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option>
-            <option>MIDCPNIFTY</option><option>SENSEX</option></select></label>
-        <label class="f" for="exp">Expiry<select id="exp"><option value="">nearest</option></select></label>
-        <label class="f" for="otm">OTM count<input id="otm" type="number" min="0" max="20" value="5" /></label>
-        <label class="f" for="otf">Timeframe
-          <select id="otf" data-tf="1"></select></label>
-        <label class="f" for="ref">ATM from
-          <select id="ref"><option value="index">index spot</option><option value="future">future</option></select></label>
-        <label class="f" for="amin">ADX min<input id="amin" type="number" min="0" step="1" value="20" /></label>
-        <label class="f" for="lots">Lots to buy<input id="lots" type="number" min="1" step="1" value="1" /></label>
-        <button type="submit" class="go" id="btnScan">Scan</button>
-        <label class="inline" for="autoScan"><input type="checkbox" id="autoScan" /> Auto-refresh</label>
-      </form>
-      <p id="chainMeta" class="sub" style="margin:11px 0 0"></p>
-      <div class="scroll" style="margin-top:6px">
-        <table>
-          <thead><tr>
-            <th class="l">Contract</th><th class="l">Type</th><th>Strike</th>
-            <th>LTP</th><th>VWAP</th><th>&gt;VWAP</th><th>RSI(21)</th><th>EMA(RSI,21)</th>
-            <th>EMA(21)</th><th>Supertrend</th><th>ADX</th><th>Ready</th>
-            <th class="l">Blocking condition</th><th>Actions</th>
-          </tr></thead>
-          <tbody id="chain"><tr><td colspan="14" class="mut">Press Scan.</td></tr></tbody>
-        </table>
-      </div>
-    </section>
+    <div role="tablist" aria-label="Option views" class="row"
+         style="align-items:center;margin:0 0 10px;gap:6px">
+      <button type="button" role="tab" id="opt-tab-scan" class="go"
+              aria-controls="opt-panel-scan" aria-selected="true">Option scan</button>
+      <button type="button" role="tab" id="opt-tab-straddle"
+              aria-controls="opt-panel-straddle" aria-selected="false" tabindex="-1">Straddle</button>
+    </div>
+
+    <div role="tabpanel" id="opt-panel-scan" aria-labelledby="opt-tab-scan">
+      <section class="panel">
+        <h2>ATM and OTM scan</h2>
+        <p class="sub">Current price, VWAP, RSI(21), EMA(RSI,21), EMA(21), Supertrend(21, 0.618)
+          and ADX for the ATM strike plus OTM strikes on both sides. Rows highlighted green
+          meet every entry condition. For open interest, OI change and the 5-minute buildup on
+          every strike, open the <a href="/chain">full option chain ↗</a>.</p>
+        <form class="row" id="chainForm">
+          <label class="f" for="und">Underlying
+            <select id="und"><option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option>
+              <option>MIDCPNIFTY</option><option>SENSEX</option></select></label>
+          <label class="f" for="exp">Expiry<select id="exp"><option value="">nearest</option></select></label>
+          <label class="f" for="otm">OTM count<input id="otm" type="number" min="0" max="20" value="5" /></label>
+          <label class="f" for="otf">Timeframe
+            <select id="otf" data-tf="1"></select></label>
+          <label class="f" for="ref">ATM from
+            <select id="ref"><option value="index">index spot</option><option value="future">future</option></select></label>
+          <label class="f" for="amin">ADX min<input id="amin" type="number" min="0" step="1" value="20" /></label>
+          <label class="f" for="lots">Lots to buy<input id="lots" type="number" min="1" step="1" value="1" /></label>
+          <button type="submit" class="go" id="btnScan">Scan</button>
+          <label class="inline" for="autoScan"><input type="checkbox" id="autoScan" /> Auto-refresh</label>
+        </form>
+        <p id="chainMeta" class="sub" style="margin:11px 0 0"></p>
+        <div class="scroll" style="margin-top:6px">
+          <table>
+            <thead><tr>
+              <th class="l">Contract</th><th class="l">Type</th><th>Strike</th>
+              <th>LTP</th><th>VWAP</th><th>&gt;VWAP</th><th>RSI(21)</th><th>EMA(RSI,21)</th>
+              <th>EMA(21)</th><th>Supertrend</th><th>ADX</th><th>Ready</th>
+              <th class="l">Blocking condition</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="chain"><tr><td colspan="14" class="mut">Press Scan.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <div role="tabpanel" id="opt-panel-straddle" aria-labelledby="opt-tab-straddle" hidden>
+      <section class="panel">
+        <h2>Straddle monitor</h2>
+        <p class="sub">CE + PE premium for ATM and seven listed strikes on either side (15 rows).
+          Change is from the previous session's combined close. Above / below compares the live
+          straddle price with VWAP and EMA(21) from the latest closed combined candle; trend uses
+          Supertrend(21, 0.618).</p>
+        <form class="row" id="straddleForm">
+          <label class="f" for="strUnd">Underlying
+            <select id="strUnd"><option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option>
+              <option>MIDCPNIFTY</option><option>SENSEX</option></select></label>
+          <label class="f" for="strExp">Expiry
+            <select id="strExp"><option value="">nearest</option></select></label>
+          <label class="f" for="strTf">Timeframe
+            <select id="strTf" data-tf="1"></select></label>
+          <button type="submit" class="go" id="btnStraddle">Scan straddles</button>
+        </form>
+        <p id="straddleMeta" class="sub" style="margin:11px 0 0"></p>
+        <div class="scroll" style="margin-top:6px">
+          <table>
+            <thead><tr>
+              <th class="l">Strike</th><th>Straddle price</th><th>Change price</th>
+              <th>Change %</th><th>VWAP · above / below</th>
+              <th>Supertrend (21, 0.618)</th><th>EMA 21 · above / below</th>
+            </tr></thead>
+            <tbody id="straddleRows"><tr><td colspan="7" class="mut">Press Scan straddles.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   </div>
 
   <!-- ============================= BASKETS ============================= -->
@@ -1455,12 +1496,110 @@ function renderWatches(list) {
 }
 
 /* ---------------------------------------------------------------- options */
+const OPTION_TABS = ["scan", "straddle"];
+function showOptionTab(name) {
+  OPTION_TABS.forEach((tab) => {
+    const button = $("opt-tab-" + tab), panel = $("opt-panel-" + tab);
+    const selected = tab === name;
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.tabIndex = selected ? 0 : -1;
+    button.classList.toggle("go", selected);
+    panel.hidden = !selected;
+  });
+  if (name === "straddle") loadStraddleExpiries();
+}
+OPTION_TABS.forEach((tab, index) => {
+  const button = $("opt-tab-" + tab);
+  button.onclick = () => showOptionTab(tab);
+  button.onkeydown = (ev) => {
+    if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
+    ev.preventDefault();
+    const next = OPTION_TABS[
+      (index + (ev.key === "ArrowRight" ? 1 : OPTION_TABS.length - 1)) % OPTION_TABS.length
+    ];
+    showOptionTab(next); $("opt-tab-" + next).focus();
+  };
+});
+
 async function loadExpiries() {
   try {
     const d = await api("/api/options/expiries?underlying=" + encodeURIComponent($("und").value));
     $("exp").innerHTML = '<option value="">nearest</option>' +
       (d.expiries || []).slice(0, 12).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join("");
   } catch (e) { /* not fatal: nearest still works */ }
+}
+
+async function loadStraddleExpiries() {
+  const select = $("strExp"), selected = select.value;
+  try {
+    const d = await api("/api/options/expiries?underlying=" + encodeURIComponent($("strUnd").value));
+    const expiries = d.active || d.expiries || [];
+    select.innerHTML = '<option value="">nearest</option>' +
+      expiries.slice(0, 12).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join("");
+    if (expiries.includes(selected)) select.value = selected;
+  } catch (e) { /* not fatal: nearest still works */ }
+}
+$("strUnd").onchange = loadStraddleExpiries;
+$("straddleForm").onsubmit = (ev) => { ev.preventDefault(); loadStraddles(); };
+
+async function loadStraddles() {
+  const q = new URLSearchParams({
+    underlying: $("strUnd").value,
+    timeframe_minutes: $("strTf").value,
+  });
+  if ($("strExp").value) q.set("expiry", $("strExp").value);
+  $("btnStraddle").disabled = true;
+  $("straddleMeta").textContent = "";
+  $("straddleRows").innerHTML = '<tr><td colspan="7" class="mut">Scanning 15 straddles…</td></tr>';
+  try {
+    const d = await api("/api/options/straddles?" + q.toString());
+    const rows = d.rows || [];
+    const incomplete = rows.filter((row) => row.error).length;
+    const shortage = Math.max(0, Number(d.requested_rows || 15) - rows.length);
+    $("straddleMeta").textContent =
+      d.underlying + " " + d.expiry + " · spot " + n(d.spot) + " · ATM " + n(d.atm_strike, 0) +
+      " · " + tfCode(d.timeframe_minutes) + " · " + rows.length + "/" + (d.requested_rows || 15) +
+      " strikes · closed candle " + clock(d.as_of) +
+      (d.expires_today ? " · EXPIRES TODAY" : "") +
+      (shortage ? " · " + shortage + " boundary strike(s) unavailable" : "") +
+      (incomplete ? " · " + incomplete + " incomplete row(s)" : "");
+    renderStraddles(rows);
+  } catch (e) {
+    note(e.message);
+    $("straddleRows").innerHTML = '<tr><td colspan="7" class="down"></td></tr>';
+    $("straddleRows").querySelector("td").textContent = e.message;
+  } finally { $("btnStraddle").disabled = false; }
+}
+
+function straddleStateClass(value) {
+  if (value === "above" || value === "positive") return "up";
+  if (value === "below" || value === "negative") return "down";
+  return "mut";
+}
+function straddleStateLabel(value) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : "—";
+}
+function renderStraddles(rows) {
+  const body = $("straddleRows");
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="7" class="mut">No strikes available.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map((row) => {
+    const move = row.change_price > 0 ? "up" : row.change_price < 0 ? "down" : "mut";
+    const percent = row.change_pct == null ? "—" : n(row.change_pct) + "%";
+    const warning = row.error ? ` <span class="down" title="${esc(row.error)}">⚠</span>` : "";
+    const atm = row.atm ? ' <span class="tagb">ATM</span>' : "";
+    return `<tr${row.atm ? ' style="background:#182b40"' : ""} title="${esc(row.error)}">
+      <td class="l"><strong>${n(row.strike, 0)}</strong>${atm}${warning}</td>
+      <td title="CE ${n(row.ce_ltp)} + PE ${n(row.pe_ltp)}">${n(row.straddle_price)}</td>
+      <td class="${move}" title="Previous close ${n(row.previous_close)}">${n(row.change_price)}</td>
+      <td class="${move}">${percent}</td>
+      <td class="${straddleStateClass(row.vwap_position)}" title="VWAP ${n(row.vwap)}">${straddleStateLabel(row.vwap_position)}</td>
+      <td class="${straddleStateClass(row.supertrend_trend)}" title="Supertrend ${n(row.supertrend)}">${straddleStateLabel(row.supertrend_trend)}</td>
+      <td class="${straddleStateClass(row.ema_21_position)}" title="EMA 21 ${n(row.ema_21)}">${straddleStateLabel(row.ema_21_position)}</td>
+    </tr>`;
+  }).join("");
 }
 $("und").onchange = loadExpiries;
 $("autoScan").onchange = () => {
