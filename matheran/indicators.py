@@ -403,6 +403,114 @@ def session_vwap(
     return out
 
 
+def session_vwap_sigma(
+    high: ArrayLike,
+    low: ArrayLike,
+    close: ArrayLike,
+    volume: ArrayLike,
+    session_ids: Sequence[object] | None = None,
+) -> np.ndarray:
+    """Cumulative population standard deviation of the typical price around the
+    session VWAP, reset per session, under exactly session_vwap()'s volume rules.
+
+    A session with volume:
+        sigma = sqrt(max(Σ(V × TP²) / ΣV − VWAP², 0))
+    accumulated over the bars that traded. A zero-volume bar inside such a session
+    adds nothing and carries the cumulative state forward; before the session's first
+    traded bar sigma is undefined (NaN), since nothing has been weighted yet.
+
+    A session with no volume at all (index candles): the unweighted population
+    standard deviation of the typical prices so far, the dispersion that matches
+    session_vwap()'s running-mean fallback.
+
+    The sums are taken about the session's first contributing typical price. That is
+    the same formula (a shift does not change a variance) without the cancellation
+    Σ(V × TP²) / ΣV − VWAP² suffers at index-sized prices.
+    """
+    h, l, c, v = _arr(high), _arr(low), _arr(close), _arr(volume)
+    n = c.size
+    out = np.full(n, np.nan)
+    if n == 0:
+        return out
+
+    typical = (h + l + c) / 3.0
+    ids = list(session_ids) if session_ids is not None else [0] * n
+
+    # The same per-session volume test as session_vwap(), so the two always agree on
+    # which sessions are volume-weighted.
+    volume_by_session: dict[object, float] = {}
+    for i in range(n):
+        vol = v[i] if np.isfinite(v[i]) else 0.0
+        volume_by_session[ids[i]] = volume_by_session.get(ids[i], 0.0) + max(0.0, vol)
+
+    last_id = object()
+    shift = 0.0
+    weight = s1 = s2 = 0.0
+    count = 0
+
+    for i in range(n):
+        if ids[i] != last_id:
+            shift = 0.0
+            weight = s1 = s2 = 0.0
+            count = 0
+            last_id = ids[i]
+
+        tp = typical[i]
+
+        if volume_by_session.get(ids[i], 0.0) <= 0.0:
+            if count == 0:
+                shift = tp
+            d = tp - shift
+            count += 1
+            s1 += d
+            s2 += d * d
+            mean = s1 / count
+            out[i] = np.sqrt(max(s2 / count - mean * mean, 0.0))
+            continue
+
+        vol = v[i] if np.isfinite(v[i]) else 0.0
+        if vol > 0.0:
+            if weight == 0.0:
+                shift = tp
+            d = tp - shift
+            weight += vol
+            s1 += vol * d
+            s2 += vol * d * d
+
+        if weight > 0.0:
+            mean = s1 / weight
+            out[i] = np.sqrt(max(s2 / weight - mean * mean, 0.0))
+
+    return out
+
+
+def session_vwap_bands(
+    high: ArrayLike,
+    low: ArrayLike,
+    close: ArrayLike,
+    volume: ArrayLike,
+    session_ids: Sequence[object] | None = None,
+    multiplier: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Advanced VWAP Bands: (vwap, upper, lower).
+
+    The centerline is session_vwap() itself, unchanged, so the bands can never move
+    the line every price-versus-VWAP condition compares against:
+
+        upper = VWAP + multiplier × sigma
+        lower = VWAP − multiplier × sigma
+
+    with sigma from session_vwap_sigma(). Chart-only: nothing in the engine, the
+    scanner or the strategy reads the bands.
+    """
+    m = float(multiplier)
+    if not np.isfinite(m) or m <= 0.0:
+        raise ValueError("the VWAP band multiplier must be a positive number")
+    center = session_vwap(high, low, close, volume, session_ids)
+    sigma = session_vwap_sigma(high, low, close, volume, session_ids)
+    return center, center + m * sigma, center - m * sigma
+
+
 def crossed_above(a: np.ndarray, b: np.ndarray, index: int) -> bool:
     """True when series `a` crossed from at-or-below `b` to above it at `index`."""
     if index < 1:

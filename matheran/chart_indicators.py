@@ -4,13 +4,16 @@ This sits deliberately outside the data-source contract. Every provider returns
 OHLCV and nothing more, so indicators are computed here from whatever came back.
 Adding a broker therefore never means implementing indicators again.
 
-The strategy's own indicators (Advanced VWAP, EMA, Supertrend, RSI and its signal lines, ADX)
+The strategy's own indicators (session VWAP, EMA, Supertrend, RSI and its signal lines, ADX)
 use the same functions and the same periods from the same config, so what the chart
 draws and what the engine acts on cannot drift apart. The single difference is that
 charts include the bar still forming, while the engine only ever acts on closed bars.
 
 Chart-only indicators carry parameters of their own, edited on the charts page:
 
+  * Advanced VWAP Bands: the session VWAP ± a standard-deviation multiplier (default
+    2.0). Only the upper and lower bands; the centerline belongs to "VWAP (session)",
+    so turning both on never draws it twice. No signal reads the bands;
   * ZEMA, the zero-lag EMA, twice (default 50 and 200);
   * a Supertrend on two timeframes, each with its own timeframe, ATR period and factor.
     A timeframe above the chart's is drawn the way it read live: on each chart bar,
@@ -37,6 +40,7 @@ from .indicators import (
     ema_of,
     rsi as rsi_ind,
     session_vwap,
+    session_vwap_bands,
     supertrend,
     supertrend_states,
     supertrend_step,
@@ -63,10 +67,16 @@ def _tf(key: str, label: str, default: str) -> dict:
 # Everything the charts can draw. `pane` 0 is the price chart; 1 and 2 are the
 # stacked sub-panes. `overlay` means it shares the price axis. `color` is the default
 # line colour; an entry with `color_down` is drawn in two colours (up/down trend) and
-# the charts page offers a picker for each. `params` are edited on the charts page.
+# the charts page offers a picker for each; an entry with `bands` is an upper and a
+# lower line (`color`, `color_lower`). `params` are edited on the charts page.
 CATALOG: tuple[dict, ...] = (
-    {"id": "vwap", "label": "Advanced VWAP (session)", "pane": 0, "overlay": True, "color": "#f2cc60",
+    # The id stays "vwap" so saved chart settings and API callers keep working; only
+    # the label changed. It is the plain session VWAP the strategy compares against.
+    {"id": "vwap", "label": "VWAP (session)", "pane": 0, "overlay": True, "color": "#f2cc60",
      "default": True},
+    {"id": "vwap_bands", "label": "Advanced VWAP Bands", "pane": 0, "overlay": True,
+     "color": "#d97706", "color_lower": "#0891b2", "bands": True, "default": False,
+     "params": (_float("multiplier", "Std-dev multiplier", 2.0, 0.1, 10.0, 0.1),)},
     {"id": "ema_price", "label": "EMA(21) on price", "pane": 0, "overlay": True,
      "color": "#58a6ff", "default": True},
     {"id": "supertrend", "label": "Supertrend (21, 0.618)", "pane": 0, "overlay": True,
@@ -205,6 +215,16 @@ def _points(times: list[int], values: np.ndarray) -> list[dict]:
     return out
 
 
+def _band_points(times: list[int], upper: np.ndarray, lower: np.ndarray) -> list[dict]:
+    """Upper and lower band per bar, NaN warmup dropped (both are defined together)."""
+    out: list[dict] = []
+    for t, u, lo in zip(times, upper, lower):
+        fu, fl = float(u), float(lo)
+        if fu == fu and fl == fl:
+            out.append({"time": t, "upper": round(fu, 4), "lower": round(fl, 4)})
+    return out
+
+
 def _trend_points(times: list[int], line: np.ndarray, direction: np.ndarray) -> list[dict]:
     rows: list[dict] = []
     for t, v, d in zip(times, line, direction):
@@ -305,13 +325,19 @@ def compute(
     low = np.array([b.low for b in bars], dtype=float)
     close = np.array([b.close for b in bars], dtype=float)
     volume = np.array([b.volume for b in bars], dtype=float)
-    # Advanced VWAP resets per trading day, so bars are grouped by their IST date.
+    # VWAP resets per trading day, so bars are grouped by their IST date.
     sessions = [datetime.fromtimestamp(t, IST).date() for t in times]
 
     out: dict[str, list[dict]] = {}
 
     if "vwap" in ids:
         out["vwap"] = _points(times, session_vwap(high, low, close, volume, sessions))
+
+    if "vwap_bands" in ids:
+        multiplier = float(resolved("vwap_bands", params)["multiplier"])
+        _center, upper, lower = session_vwap_bands(high, low, close, volume, sessions,
+                                                   multiplier)
+        out["vwap_bands"] = _band_points(times, upper, lower)
 
     if "ema_price" in ids:
         out["ema_price"] = _points(times, ema(close, cfg.price_ema_period))

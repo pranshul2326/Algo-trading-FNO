@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Matheran CLI.
+"""Saidarshan CLI.
 
     python run.py selfcheck              validate the indicator maths
     python run.py doctor                 check broker credentials and config
     python run.py chain --underlying NIFTY   print the ATM/OTM scan table
     python run.py scan --universe nifty50    live BUY/SELL scanner (read-only)
     python run.py scan --symbols NSE:RELIANCE,BSE:TCS,MCX:GOLD --side both --values
-    python run.py serve                  start the API and dashboard
+    python run.py serve                  start the API, the portal (/) and the app (/app)
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def _logging(verbose: bool) -> None:
 def cmd_selfcheck(_args) -> int:
     from matheran.selfcheck import main as selfcheck_main
 
-    print("Matheran indicator and strategy self-check\n")
+    print("Saidarshan indicator and strategy self-check\n")
     return selfcheck_main()
 
 
@@ -152,8 +152,8 @@ def cmd_chain(args) -> int:
             f"{args.timeframe}m candles\n"
         )
         head = (
-            f"{'CONTRACT':<26}{'TYPE':>5}{'STRIKE':>9}{'MONEY':>7}{'LTP':>10}{'Advanced VWAP':>10}"
-            f"{'>Advanced VWAP':>7}{'RSI':>8}{'EMA(RSI)':>10}{'EMA21':>9}{'SUPERT':>10}{'ADX':>7}{'READY':>7}"
+            f"{'CONTRACT':<26}{'TYPE':>5}{'STRIKE':>9}{'MONEY':>7}{'LTP':>10}{'VWAP':>10}"
+            f"{'>VWAP':>7}{'RSI':>8}{'EMA(RSI)':>10}{'EMA21':>9}{'SUPERT':>10}{'ADX':>7}{'READY':>7}"
         )
         print(head)
         print("-" * len(head))
@@ -176,7 +176,7 @@ def cmd_chain(args) -> int:
 
         above = [r for r in rows if r.price_above_vwap]
         ready = [r for r in rows if r.entry_ready]
-        print(f"\n{len(above)} strikes trading above Advanced VWAP, {len(ready)} meeting every entry condition")
+        print(f"\n{len(above)} strikes trading above VWAP, {len(ready)} meeting every entry condition")
         if ready:
             print("entry-ready:")
             for r in ready:
@@ -400,10 +400,11 @@ def cmd_serve(args) -> int:
 
     app = create_app(cfg)
     banner = f"""
-  Matheran trading API
+  Saidarshan trading API
   mode        : {cfg.mode.upper()}{"   <-- REAL ORDERS" if cfg.live else "   (orders simulated)"}
   broker      : {cfg.broker.name}
-  dashboard   : http://{cfg.server.host}:{cfg.server.port}/
+  portal      : http://{cfg.server.host}:{cfg.server.port}/
+  app         : http://{cfg.server.host}:{cfg.server.port}/app
   api docs    : http://{cfg.server.host}:{cfg.server.port}/docs
   auth        : {"X-API-Key required" if cfg.secrets.api_key else "OPEN (no MATHERAN_API_KEY set)"}
 """
@@ -413,7 +414,7 @@ def cmd_serve(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="matheran", description=__doc__,
+    p = argparse.ArgumentParser(prog="saidarshan", description=__doc__,
                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-c", "--config", default=None, help="path to config.yaml")
     p.add_argument("-v", "--verbose", action="store_true")

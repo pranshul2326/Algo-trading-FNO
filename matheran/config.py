@@ -34,7 +34,7 @@ class EngineConfig:
 
 @dataclass(slots=True)
 class StrategyConfig:
-    timeframe_minutes: int = 5
+    timeframe_minutes: int = 5           # entry: the candles the entry conditions read
     rsi_period: int = 21
     rsi_signal_entry_period: int = 21
     rsi_signal_exit_period: int = 9
@@ -58,6 +58,9 @@ class StrategyConfig:
     # null builds the rows from the three legacy settings above, which is all an
     # older config.yaml has. [] means no indicator exits at all.
     exit_rules: list | None = None
+    # The candles the exit conditions read. null = each watch's own (entry)
+    # timeframe, as before. Orders placed from a chart keep the chart's timeframe.
+    exit_timeframe_minutes: int | None = None
 
     def warmup_bars(self) -> int:
         """Minimum closed candles needed before any signal can be trusted.
@@ -173,10 +176,47 @@ class Config:
     secrets: Secrets = field(default_factory=Secrets.from_env)
     data_dir: Path = field(default_factory=lambda: Path("data"))
     cache_dir: Path = field(default_factory=lambda: Path("cache"))
+    # Workspace id -> workspaces.WorkspaceSettings (strategy, risk, setup defaults).
+    # Built from deep copies of the sections above unless config.yaml saved its own
+    # under `workspaces:`. Filled on load, or on first use for a Config built in code.
+    workspaces: dict = field(default_factory=dict)
 
     @property
     def live(self) -> bool:
         return self.mode.lower() == "live"
+
+    def workspace(self, workspace: str):
+        """The settings of one workspace (see workspaces.py)."""
+        from . import workspaces as ws_mod
+
+        if workspace not in ws_mod.WORKSPACES:
+            raise ValueError(f"unknown workspace {workspace!r}")
+        if workspace not in self.workspaces:
+            self.workspaces[workspace] = ws_mod.fresh(self, workspace)
+        return self.workspaces[workspace]
+
+    def strategy_for(self, workspace: str | None) -> StrategyConfig:
+        """Strategy settings for a workspace; the top-level ones for anything else (a
+        legacy record no workspace owns, or a caller that names none)."""
+        from . import workspaces as ws_mod
+
+        if workspace in ws_mod.WORKSPACES:
+            return self.workspace(workspace).strategy
+        return self.strategy
+
+    def risk_for(self, workspace: str | None) -> RiskConfig:
+        from . import workspaces as ws_mod
+
+        if workspace in ws_mod.WORKSPACES:
+            return self.workspace(workspace).risk
+        return self.risk
+
+    def defaults_for(self, workspace: str | None) -> dict:
+        from . import workspaces as ws_mod
+
+        if workspace in ws_mod.WORKSPACES:
+            return self.workspace(workspace).defaults
+        return {}
 
 
 def _section(raw: dict[str, Any], key: str, cls):
@@ -228,82 +268,119 @@ def load_config(path: str | Path | None = None, *, load_env: bool = True) -> Con
         scanner=_section(raw, "scanner", ScannerConfig),
         secrets=Secrets.from_env(),
     )
+    # The top-level sections are validated (and normalised in place) first, so every
+    # workspace copies settled values; then each workspace is built and validated.
+    validate(cfg)
+    from . import workspaces as ws_mod
+
+    saved = raw.get("workspaces") or {}
+    if not isinstance(saved, dict):
+        raise ValueError("config section 'workspaces' must be a mapping")
+    unknown = set(saved) - set(ws_mod.WORKSPACE_IDS)
+    if unknown:
+        raise ValueError(f"unknown workspaces in config: {sorted(unknown)}")
+    for ws in ws_mod.WORKSPACE_IDS:
+        cfg.workspaces[ws] = ws_mod.fresh(cfg, ws, saved.get(ws))
     validate(cfg)
     return cfg
 
 
-def validate(cfg: Config) -> None:
+def validate_trading(strategy: StrategyConfig, risk: RiskConfig, prefix: str = "") -> None:
+    """Validate (and normalise in place) one strategy + risk pair: the top-level
+    sections with no prefix, or a workspace's with prefix "workspaces.<id>."."""
     from .timeframes import MINUTES, code_of
 
-    if cfg.mode.lower() not in {"paper", "live"}:
-        raise ValueError("mode must be 'paper' or 'live'")
     try:
-        cfg.strategy.timeframe_minutes = int(cfg.strategy.timeframe_minutes)
+        strategy.timeframe_minutes = int(strategy.timeframe_minutes)
     except (TypeError, ValueError):
-        raise ValueError("strategy.timeframe_minutes must be a number of minutes") from None
-    if cfg.strategy.timeframe_minutes not in MINUTES:
+        raise ValueError(f"{prefix}strategy.timeframe_minutes must be a number of minutes") from None
+    if strategy.timeframe_minutes not in MINUTES:
         raise ValueError(
-            "strategy.timeframe_minutes must be one of "
+            f"{prefix}strategy.timeframe_minutes must be one of "
             + ", ".join(f"{m} ({code_of(m)})" for m in MINUTES)
         )
-    if cfg.strategy.entry_condition_mode not in {"state", "cross"}:
-        raise ValueError("strategy.entry_condition_mode must be 'state' or 'cross'")
+    exit_tf = strategy.exit_timeframe_minutes
+    if exit_tf in ("", 0):
+        exit_tf = None
+    if exit_tf is not None:
+        try:
+            exit_tf = int(exit_tf)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{prefix}strategy.exit_timeframe_minutes must be a number of minutes or null"
+            ) from None
+        if exit_tf not in MINUTES:
+            raise ValueError(
+                f"{prefix}strategy.exit_timeframe_minutes must be null (same as entry) or one of "
+                + ", ".join(f"{m} ({code_of(m)})" for m in MINUTES)
+            )
+    strategy.exit_timeframe_minutes = exit_tf
+    if strategy.entry_condition_mode not in {"state", "cross"}:
+        raise ValueError(f"{prefix}strategy.entry_condition_mode must be 'state' or 'cross'")
     from .candles import normalize_candle_type
 
-    cfg.strategy.entry_candle_type = normalize_candle_type(
-        cfg.strategy.entry_candle_type, "strategy.entry_candle_type"
+    strategy.entry_candle_type = normalize_candle_type(
+        strategy.entry_candle_type, f"{prefix}strategy.entry_candle_type"
     )
-    if cfg.strategy.exit_condition_mode not in {"state", "cross"}:
-        raise ValueError("strategy.exit_condition_mode must be 'state' or 'cross'")
+    if strategy.exit_condition_mode not in {"state", "cross"}:
+        raise ValueError(f"{prefix}strategy.exit_condition_mode must be 'state' or 'cross'")
     from .rules import normalize_rules
 
     # Normalised in place: numbers typed into the console arrive as strings, and
     # missing parameters are filled with their defaults before anything reads them.
-    cfg.strategy.exit_rules = normalize_rules(cfg.strategy.exit_rules)
+    strategy.exit_rules = normalize_rules(strategy.exit_rules)
     from .rules import effective_rules
 
-    if str(cfg.risk.exit_mode).lower() == "strategy" and not effective_rules(cfg.strategy):
+    if str(risk.exit_mode).lower() == "strategy" and not effective_rules(strategy):
         raise ValueError(
             "exit mode 'exit conditions only' needs at least one exit condition; with "
             "none, nothing but the square-off or a manual exit would ever close a trade"
         )
-    if not 0 < cfg.risk.stop_loss_pct < 100:
-        raise ValueError("risk.stop_loss_pct must be between 0 and 100")
-    if cfg.risk.target_pct is not None and cfg.risk.target_pct <= 0:
-        raise ValueError("risk.target_pct must be positive or null")
-    if cfg.risk.breakeven_trigger_pct is not None and cfg.risk.breakeven_trigger_pct <= 0:
-        raise ValueError("risk.breakeven_trigger_pct must be positive or null")
+    if not 0 < risk.stop_loss_pct < 100:
+        raise ValueError(f"{prefix}risk.stop_loss_pct must be between 0 and 100")
+    if risk.target_pct is not None and risk.target_pct <= 0:
+        raise ValueError(f"{prefix}risk.target_pct must be positive or null")
+    if risk.breakeven_trigger_pct is not None and risk.breakeven_trigger_pct <= 0:
+        raise ValueError(f"{prefix}risk.breakeven_trigger_pct must be positive or null")
     if (
-        cfg.risk.target_pct is not None
-        and cfg.risk.breakeven_trigger_pct is not None
-        and cfg.risk.breakeven_trigger_pct >= cfg.risk.target_pct
+        risk.target_pct is not None
+        and risk.breakeven_trigger_pct is not None
+        and risk.breakeven_trigger_pct >= risk.target_pct
     ):
         raise ValueError(
-            "risk.breakeven_trigger_pct must be below risk.target_pct, otherwise the "
-            "target fires first and the breakeven stop never moves"
+            f"{prefix}risk.breakeven_trigger_pct must be below {prefix}risk.target_pct, "
+            "otherwise the target fires first and the breakeven stop never moves"
         )
-    product = str(cfg.engine.default_product or "").upper()
-    if product not in {"INTRADAY", "DELIVERY"}:
-        raise ValueError("engine.default_product must be INTRADAY or DELIVERY")
-    cfg.engine.default_product = product
-    mode = str(cfg.risk.exit_mode or "").lower()
+    mode = str(risk.exit_mode or "").lower()
     if mode not in {"both", "sl_target", "strategy"}:
-        raise ValueError("risk.exit_mode must be both, sl_target or strategy")
-    cfg.risk.exit_mode = mode
-    r = cfg.risk
+        raise ValueError(f"{prefix}risk.exit_mode must be both, sl_target or strategy")
+    risk.exit_mode = mode
+    r = risk
     if r.trail_profit_unit not in {"pct", "pts"}:
-        raise ValueError("risk.trail_profit_unit must be pct or pts")
+        raise ValueError(f"{prefix}risk.trail_profit_unit must be pct or pts")
     trail_set = r.trail_profit_trigger_pct is not None or r.trail_profit_value is not None
     if trail_set:
         if r.trail_profit_trigger_pct is None or r.trail_profit_value is None:
             raise ValueError(
-                "trailing profit needs both risk.trail_profit_trigger_pct and "
-                "risk.trail_profit_value, or neither"
+                f"trailing profit needs both {prefix}risk.trail_profit_trigger_pct and "
+                f"{prefix}risk.trail_profit_value, or neither"
             )
         if r.trail_profit_trigger_pct <= 0 or r.trail_profit_value <= 0:
             raise ValueError("trailing profit trigger and distance must be positive")
         if r.trail_profit_unit == "pct" and r.trail_profit_value >= 100:
             raise ValueError("a trailing profit distance of 100% or more is not a usable stop")
+
+
+def validate(cfg: Config) -> None:
+    if cfg.mode.lower() not in {"paper", "live"}:
+        raise ValueError("mode must be 'paper' or 'live'")
+    validate_trading(cfg.strategy, cfg.risk)
+    product = str(cfg.engine.default_product or "").upper()
+    if product not in {"INTRADAY", "DELIVERY"}:
+        raise ValueError("engine.default_product must be INTRADAY or DELIVERY")
+    cfg.engine.default_product = product
+    for ws, settings in cfg.workspaces.items():
+        validate_trading(settings.strategy, settings.risk, prefix=f"workspaces.{ws}.")
     if cfg.broker.name not in {"dhan", "stoxkart", "paper"}:
         raise ValueError("broker.name must be one of dhan, stoxkart, paper")
     if cfg.broker.data_broker not in {None, "", "upstox", "dhan", "synthetic"}:

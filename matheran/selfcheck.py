@@ -390,7 +390,352 @@ def run_checks() -> list[tuple[str, bool, str]]:
     )
 
     results.extend(_chart_and_timeframe_checks(c, h, l))
+    results.extend(_vwap_band_checks())
+    results.extend(_supertrend_payload_checks())
+    results.extend(_workspace_checks())
     results.extend(_scanner_checks())
+    return results
+
+
+def _ref_weighted_sigma(tp: list[float], vol: list[float]) -> float:
+    """Two-pass population standard deviation of tp weighted by vol (a naive reference)."""
+    w = sum(vol)
+    mean = sum(x * v for x, v in zip(tp, vol)) / w
+    return (sum(v * (x - mean) ** 2 for x, v in zip(tp, vol)) / w) ** 0.5
+
+
+def _vwap_band_checks() -> list[tuple[str, bool, str]]:
+    """Advanced VWAP Bands against a naive two-pass reference, plus the session and
+    zero-volume rules they share with session_vwap()."""
+    from datetime import date as _date
+
+    from .chart_indicators import compute as chart_compute
+    from .chart_indicators import parse_params
+    from .data_source import Bar
+    from .indicators import session_vwap_bands, session_vwap_sigma
+
+    results: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        results.append((name, bool(ok), detail))
+
+    rng = random.Random(29)
+    # Two sessions with volume (with isolated zero-volume bars and a leading one),
+    # then one index-like session with no volume at all.
+    h, l, c, v, ids = [], [], [], [], []
+    price = 812.0
+    for sess, n in ((1, 90), (2, 75), (3, 60)):
+        for i in range(n):
+            o = price
+            cl = max(1.0, o + rng.gauss(0, 1.1))
+            h.append(max(o, cl) + rng.random())
+            l.append(min(o, cl) - rng.random())
+            c.append(cl)
+            if sess == 3:
+                v.append(0.0)
+            elif (sess == 2 and i == 0) or i % 17 == 9:
+                v.append(0.0)
+            else:
+                v.append(float(rng.randint(50, 5000)))
+            ids.append(sess)
+            price = cl
+    H, L, C, V = (np.array(x, dtype=float) for x in (h, l, c, v))
+    center, upper, lower = session_vwap_bands(H, L, C, V, ids, 2.0)
+    sigma = session_vwap_sigma(H, L, C, V, ids)
+    plain = session_vwap(H, L, C, V, ids)
+    check("vwap bands: the centerline is session_vwap() unchanged",
+          np.array_equal(center, plain, equal_nan=True))
+
+    tp = [(a + b + d) / 3.0 for a, b, d in zip(h, l, c)]
+    worst = 0.0
+    nan_ok = True
+    for sess in (1, 2):
+        idx = [i for i, s in enumerate(ids) if s == sess]
+        for k, i in enumerate(idx):
+            traded = [j for j in idx[: k + 1] if v[j] > 0]
+            if not traded:
+                nan_ok &= bool(np.isnan(sigma[i]))
+                continue
+            ref = _ref_weighted_sigma([tp[j] for j in traded], [v[j] for j in traded])
+            worst = max(worst, abs(ref - sigma[i]))
+    check("vwap bands: sigma matches a two-pass volume-weighted reference",
+          worst < 1e-7 and nan_ok, f"max diff {worst:.2e}")
+
+    idx3 = [i for i, s in enumerate(ids) if s == 3]
+    worst3 = max(abs(float(np.std(np.array([tp[j] for j in idx3[: k + 1]]))) - sigma[i])
+                 for k, i in enumerate(idx3))
+    check("vwap bands: a session with no volume uses the unweighted running std",
+          worst3 < 1e-7, f"max diff {worst3:.2e}")
+
+    scaled = True
+    for m in (0.5, 2.0, 3.7):
+        cm, um, lm = session_vwap_bands(H, L, C, V, ids, m)
+        ok = ~np.isnan(sigma)
+        scaled &= np.array_equal(cm, plain, equal_nan=True)
+        scaled &= bool(np.allclose(um[ok] - cm[ok], m * sigma[ok], atol=1e-9))
+        scaled &= bool(np.allclose(cm[ok] - lm[ok], m * sigma[ok], atol=1e-9))
+    check("vwap bands: upper/lower = VWAP ± multiplier × sigma; the multiplier moves only the bands",
+          scaled)
+
+    first1 = ids.index(1)
+    first2 = ids.index(2) + 1          # bar 0 of session 2 has no volume
+    check("vwap bands: reset at each session (first traded bar has zero width)",
+          sigma[first1] == 0.0 and sigma[first2] == 0.0
+          and upper[first2] == center[first2] == lower[first2])
+    check("vwap bands: undefined before a session's first traded volume",
+          bool(np.isnan(upper[ids.index(2)]) and np.isnan(lower[ids.index(2)])))
+    iso = [i for i, s in enumerate(ids) if s in (1, 2) and v[i] == 0.0 and i not in (ids.index(2),)]
+    carried = all(sigma[i] == sigma[i - 1] and center[i] == center[i - 1] for i in iso)
+    check("vwap bands: an isolated zero-volume bar carries the weighted state forward",
+          carried and bool(iso), f"{len(iso)} zero-volume bars")
+    try:
+        session_vwap_bands(H, L, C, V, ids, 0.0)
+        refused = False
+    except ValueError:
+        refused = True
+    check("vwap bands: a multiplier of 0 is refused", refused)
+
+    # Index-sized prices: the shifted sums keep sigma finite and non-negative.
+    big = np.full(50, 25000.0) + np.arange(50) * 0.05
+    s_big = session_vwap_sigma(big + 0.1, big - 0.1, big, np.full(50, 1e6))
+    check("vwap bands: index-sized prices give a finite, non-negative sigma",
+          bool(np.all(np.isfinite(s_big)) and np.all(s_big >= 0) and s_big[0] == 0.0))
+
+    # Through the chart payload: "vwap" is unchanged, "vwap_bands" carries no centerline.
+    start = int(session_open("NSE_EQ", _date(2026, 10, 5)).timestamp())
+    bars = [Bar(time=start + 60 * i, open=c[i], high=h[i], low=l[i], close=c[i], volume=v[i])
+            for i in range(90)]
+    out = chart_compute(bars, StrategyConfig(), ["vwap", "vwap_bands"],
+                        params={"vwap_bands": {"multiplier": 2.0}})
+    keys_ok = all(set(p) == {"time", "upper", "lower"} for p in out.get("vwap_bands", []))
+    same_vwap = [p["value"] for p in out["vwap"]] == [
+        round(float(x), 4) for x in session_vwap(H[:90], L[:90], C[:90], V[:90])]
+    check("charts: 'vwap' keeps its values; 'vwap_bands' carries only upper and lower",
+          keys_ok and same_vwap and len(out["vwap_bands"]) == 90)
+    bad = []
+    for raw in ('{"vwap_bands": {"multiplier": 0.05}}', '{"vwap_bands": {"multiplier": 11}}'):
+        try:
+            parse_params(raw)
+            bad.append(raw)
+        except ValueError:
+            pass
+    check("charts: the band multiplier is validated (0.1 to 10)",
+          not bad and parse_params('{"vwap_bands": {"multiplier": 2.5}}')
+          == {"vwap_bands": {"multiplier": 2.5}})
+    return results
+
+
+def _supertrend_payload_checks() -> list[tuple[str, bool, str]]:
+    """The chart payload carries one Supertrend value and one direction per bar, and a
+    15-minute Supertrend on lower-timeframe bars is stable once its 15m bar is closed."""
+    from datetime import date as _date
+
+    from .chart_indicators import compute as chart_compute
+    from .chart_indicators import htf_supertrend
+    from .data_source import Bar
+
+    results: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        results.append((name, bool(ok), detail))
+
+    one_min = _days_series(_date(2026, 10, 5), 3, seed=41)
+
+    def bars_at(series, minutes):
+        return [Bar(time=int(x.ts.timestamp()), open=x.open, high=x.high, low=x.low,
+                    close=x.close, volume=x.volume) for x in resample(series, minutes, "NSE_EQ").candles]
+
+    b5, b15 = bars_at(one_min, 5), bars_at(one_min, 15)
+    params = {"st_tf2": {"tf": "15m", "period": 10, "factor": 3.0}}
+    on5 = chart_compute(b5, StrategyConfig(), ["supertrend", "st_tf2"], params=params,
+                        other={"15m": b15}, minutes=5)
+    on15 = chart_compute(b15, StrategyConfig(), ["st_tf2"], params=params, minutes=15)
+
+    def exclusive(points):
+        times = [p["time"] for p in points]
+        return (times == sorted(set(times)) and all(p["trend"] in (-1, 1) for p in points)
+                and all(isinstance(p["value"], float) for p in points))
+
+    check("supertrend payload: exactly one value and one direction per timestamp",
+          bool(on5["supertrend"]) and exclusive(on5["supertrend"]) and exclusive(on5["st_tf2"])
+          and exclusive(on15["st_tf2"]))
+    hh = np.array([b.high for b in b15]); ll = np.array([b.low for b in b15])
+    cc = np.array([b.close for b in b15])
+    line, direction = supertrend(hh, ll, cc, 10, 3.0)
+    want = [(b.time, round(float(x), 4), -1 if d == -1 else 1)
+            for b, x, d in zip(b15, line, direction) if not np.isnan(x)]
+    check("15m Supertrend on the 15m chart is the plain series",
+          [(p["time"], p["value"], p["trend"]) for p in on15["st_tf2"]] == want)
+    flips = sum(1 for a, b in zip(on5["st_tf2"], on5["st_tf2"][1:]) if a["trend"] != b["trend"])
+
+    # Stability: cut the minutes at 11:07 and at 13:52 of the last session. Every 5m
+    # bar whose 15m bar had already closed at the first cut keeps its value.
+    last_day = one_min.candles[-1].ts.date()
+    cut1 = session_open("NSE_EQ", last_day).replace(hour=11, minute=7)
+    cut2 = session_open("NSE_EQ", last_day).replace(hour=13, minute=52)
+    part1 = CandleSeries([x for x in one_min.candles if x.ts < cut1])
+    part2 = CandleSeries([x for x in one_min.candles if x.ts < cut2])
+    early = htf_supertrend(bars_at(part1, 5), bars_at(part1, 15), 5, 15, 10, 3.0)
+    late = {p["time"]: p for p in htf_supertrend(bars_at(part2, 5), bars_at(part2, 15), 5, 15, 10, 3.0)}
+    closed_by = int(cut1.replace(minute=0).timestamp())   # the 10:45-11:00 bar closed at 11:00
+    stable = all(late[p["time"]] == p for p in early if p["time"] < closed_by)
+    # A 5m bar starting at t closes the 15m bar that started at t - 600 (both NSE-anchored
+    # at 09:15); that 5m bar must carry the closed 15m bar's own value and direction.
+    final_15m = {t: (val, d) for t, val, d in want}
+    closing = [p for p in late.values()
+               if p["time"] - 600 in final_15m and p["time"] + 300 < int(cut2.timestamp())
+               and (p["time"] + 300 - int(b15[0].time)) % 900 == 0]
+    final_ok = bool(closing) and all(
+        (p["value"], p["trend"]) == final_15m[p["time"] - 600] for p in closing)
+    check("15m Supertrend on 5m bars: closed 15m bars never change, and the bar closing a "
+          "15m bar takes its final value", stable and final_ok and bool(early),
+          f"{len(early)} points, {len(closing)} closing bars, {flips} flips")
+    return results
+
+
+def _workspace_checks() -> list[tuple[str, bool, str]]:
+    """Workspace ownership rules and scoped settings: deterministic, deep-copied, and
+    invisible to the calculations until a workspace saves settings of its own."""
+    import copy as _copy
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+
+    from . import workspaces as ws_mod
+    from .config import Config, load_config
+    from .models import Instrument, Watch
+    from .settings import SettingsManager
+
+    results: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        results.append((name, bool(ok), detail))
+
+    eq = {"segment": "NSE_EQ", "instrument_type": "EQUITY", "option_type": None}
+    ce = {"segment": "NSE_FNO", "instrument_type": "OPTIDX", "option_type": "CE"}
+    fut = {"segment": "NSE_FNO", "instrument_type": "FUTIDX", "option_type": None}
+    rule = [
+        ws_mod.assign(eq, "LONG"), ws_mod.assign(eq, "BOTH"), ws_mod.assign(ce, "LONG"),
+        ws_mod.assign(ce, "SHORT"), ws_mod.assign(ce, "LONG", basket_id="bk_1"),
+        ws_mod.assign(fut, "LONG"), ws_mod.assign(ce, "BOTH"),
+    ]
+    check("workspaces: legacy rule (stock, bought option, sold option, basket, unclassified)",
+          rule == ["stock_intraday", "stock_intraday", "option_buyer", "option_seller",
+                   "option_seller", "legacy", "legacy"], ", ".join(rule))
+    row = {"instrument": ce, "direction": "LONG"}
+    check("workspaces: a journal row's own workspace wins; old rows by the rule, never two",
+          ws_mod.of_trade(row) == "option_buyer"
+          and ws_mod.of_trade({**row, "workspace": "option_seller"}) == "option_seller"
+          and ws_mod.of_trade({**row, "workspace": "legacy"}) == "legacy"
+          and ws_mod.of_trade({**row, "workspace": "bogus"}) == "option_buyer")
+    check("workspaces: callers without a workspace get the rule; unplaceable records stay unowned",
+          ws_mod.for_new(None, eq, "LONG") == "stock_intraday"
+          and ws_mod.for_new("option_seller", eq, "LONG") == "option_seller"
+          and ws_mod.for_new(None, fut, "LONG") == "")
+    try:
+        ws_mod.normalize("nope")
+        refused = False
+    except ValueError:
+        refused = True
+    check("workspaces: ids, slugs and labels normalise; anything else is refused",
+          ws_mod.normalize("option-buyer") == "option_buyer"
+          and ws_mod.normalize("Option Seller") == "option_seller" and refused)
+    nav = ws_mod.navigation()
+    check("workspaces: three workspaces and their child views in the specified order",
+          [n["label"] for n in nav] == ["Stock Intraday", "Option Buyer", "Option Seller"]
+          and [v["label"] for v in nav[0]["views"]] == ["Setup", "Scanner", "Strategy", "Trade",
+                                                        "Journal", "Chart"]
+          and [v["label"] for v in nav[1]["views"]] == ["Setup", "Option Scan", "Strategy",
+                                                        "Trade", "Journal", "Chart"]
+          and [v["label"] for v in nav[2]["views"]] == ["Setup", "Straddle Scan", "Option Chain",
+                                                        "Basket", "Strategy", "Chart",
+                                                        "Combo Chart", "Journal"])
+
+    # Deep copies: nothing mutable is shared between workspaces or with the top level.
+    cfg = Config()
+    a, b = cfg.workspace("stock_intraday"), cfg.workspace("option_buyer")
+    a.strategy.exit_rules = [{"left": {"ind": "close"}}]
+    a.risk.stop_loss_pct = 1.5
+    a.defaults["quantity"] = 9
+    check("workspaces: settings are deep copies (editing one reaches no other, nor the top level)",
+          b.strategy.exit_rules is None and cfg.strategy.exit_rules is None
+          and b.risk.stop_loss_pct == cfg.risk.stop_loss_pct == 3.0
+          and "quantity" not in b.defaults and a.strategy is not cfg.strategy
+          and cfg.strategy_for("option_buyer") is b.strategy
+          and cfg.strategy_for(None) is cfg.strategy and cfg.strategy_for("legacy") is cfg.strategy)
+
+    # A watch reads its workspace's settings; a legacy one no workspace owns, the top level.
+    from .brokers.paper import PaperBroker
+    from .engine import Engine
+    from .store import Store
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg2 = Config(data_dir=Path(tmp))
+        engine = Engine(cfg2, PaperBroker(), Store(Path(tmp)))
+        inst = Instrument(security_id="1", segment="NSE_EQ", symbol="SBIN",
+                          instrument_type="EQUITY")
+        owned = Watch(id="w1", instrument=inst, quantity=1, timeframe_minutes=5,
+                      stop_loss_pct=3.0, target_pct=None, workspace="stock_intraday")
+        legacy_fut = Watch(id="w2", instrument=Instrument(security_id="2", segment="NSE_FNO",
+                                                          symbol="NIFTY FUT", lot_size=75,
+                                                          instrument_type="FUTIDX"),
+                           quantity=75, timeframe_minutes=5, stop_loss_pct=3.0, target_pct=None)
+        cfg2.workspace("stock_intraday").risk.exit_mode = "sl_target"
+        check("engine: a watch reads its own workspace's strategy and risk",
+              engine._strategy(owned) is cfg2.workspace("stock_intraday").strategy
+              and engine.exit_mode_for(owned) == "sl_target"
+              and engine._strategy(legacy_fut) is cfg2.strategy
+              and engine.exit_mode_for(legacy_fut) == cfg2.risk.exit_mode == "both")
+
+        # Saving one workspace persists only its own parts; a bad patch rolls back.
+        import logging as _logging
+
+        settings_log = _logging.getLogger("matheran.settings")
+        quiet_was = settings_log.level
+        settings_log.setLevel(_logging.WARNING)   # the temp-file writes are not news
+        config_path = Path(tmp) / "config.yaml"
+        cfg3 = Config(data_dir=Path(tmp))
+        mgr = SettingsManager(cfg3, env_path=Path(tmp) / ".env", config_path=config_path)
+        mgr.update_workspace("option_seller", {"risk": {"stop_loss_pct": 7.5},
+                                               "defaults": {"lots": 2}})
+        saved = yaml.safe_load(config_path.read_text())
+        try:
+            mgr.update_workspace("option_seller", {"risk": {"stop_loss_pct": 250}})
+            bad_refused = False
+        except ValueError:
+            bad_refused = True
+        check("settings: one workspace saves only its own parts; an invalid patch rolls back",
+              set(saved.get("workspaces", {})) == {"option_seller"}
+              and saved["workspaces"]["option_seller"]["risk"]["stop_loss_pct"] == 7.5
+              and saved["workspaces"]["option_seller"]["defaults"]["lots"] == 2
+              and "strategy" not in saved["workspaces"]["option_seller"]
+              and saved["risk"]["stop_loss_pct"] == 3.0 and bad_refused
+              and cfg3.workspace("option_seller").risk.stop_loss_pct == 7.5)
+
+        # Loading: a saved workspace keeps its values; the others follow the top level.
+        reloaded = load_config(config_path, load_env=False)
+        check("config: workspaces load from config.yaml, the rest from the top-level sections",
+              reloaded.workspace("option_seller").risk.stop_loss_pct == 7.5
+              and reloaded.workspace("option_seller").customised["risk"]
+              and not reloaded.workspace("stock_intraday").customised["risk"]
+              and reloaded.workspace("stock_intraday").risk.stop_loss_pct == 3.0
+              and reloaded.workspace("stock_intraday").risk is not reloaded.risk)
+        # A legacy (workspace-less) top-level change reaches only the followers.
+        mgr.update_config({"risk": {"target_pct": 9.0}})
+        check("config: a top-level change reaches the workspaces that follow it, not the saved one",
+              cfg3.workspace("stock_intraday").risk.target_pct == 9.0
+              and cfg3.workspace("option_seller").risk.target_pct is None)
+        bad = _copy.deepcopy(saved)
+        bad["workspaces"]["nowhere"] = {}
+        config_path.write_text(yaml.safe_dump(bad))
+        try:
+            load_config(config_path, load_env=False)
+            unknown_refused = False
+        except ValueError:
+            unknown_refused = True
+        check("config: an unknown workspace in config.yaml is refused", unknown_refused)
+        settings_log.setLevel(quiet_was)
     return results
 
 

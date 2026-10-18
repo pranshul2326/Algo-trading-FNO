@@ -4,7 +4,8 @@
     |  underlying spot     |  call legs           |
     +----------------------+----------------------+
     |  combined premium    |  put legs            |
-    |  + Advanced VWAP / EMA / ST   |                      |
+    |  + VWAP, bands, EMA, |                      |
+    |    Supertrend        |                      |
     +----------------------+----------------------+
 
 The arithmetic lives in combo.py; this page only draws what /api/combo returns.
@@ -17,7 +18,7 @@ COMBO_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <script src="/static/ui-theme.js"></script>
-<title>Matheran basket combo</title>
+<title>Combo Chart · Saidarshan</title>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
@@ -59,9 +60,14 @@ COMBO_HTML = r"""<!DOCTYPE html>
     box-shadow:0 8px 26px #0008; display:grid; gap:7px; }
   .dropbody .indrow { display:flex; align-items:center; gap:8px; font-size:12.5px; }
   .dropbody input[type=number] { width:64px; }
+  .dropbody input[type=number].bad { border-color:var(--down); }
+  .dropbody .hint { margin:0; font-size:11.5px; color:var(--muted); max-width:260px; }
   .swatch { display:inline-block; width:11px; height:11px; border-radius:2px; }
+  .swatch-bands { background:linear-gradient(180deg, #d97706 0 45%, transparent 45% 55%, #0891b2 55%); }
 
-  main { height:calc(100vh - 58px); padding:var(--gap); }
+  /* The page is a column: the shell, this header, then the grid filling the rest. */
+  body { display:flex; flex-direction:column; }
+  main { flex:1 1 auto; min-height:0; padding:var(--gap); }
   /* Spot top left, combo under it; calls top right, puts under them. */
   .grid { display:grid; gap:var(--gap); height:100%; grid-template-columns:1fr 1fr;
     grid-template-rows:1fr 1fr; grid-template-areas:"spot call" "combo put"; }
@@ -128,8 +134,7 @@ COMBO_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>Basket combo <a href="/#baskets">← console</a> <a href="/charts">charts ↗</a>
-    <a href="/chain">option chain ↗</a></h1>
+  <h1 id="pageTitle">Basket combo</h1>
   <label class="f" for="basket">Basket <select id="basket"><option value="">loading…</option></select></label>
   <label class="f" for="tf">Timeframe <select id="tf"></select></label>
   <label class="f" for="range" title="How the combo's high and low are inferred from its legs">Bar range
@@ -148,7 +153,16 @@ COMBO_HTML = r"""<!DOCTYPE html>
     <summary>Indicators</summary>
     <div class="dropbody" id="indList">
       <div class="indrow"><input type="checkbox" id="iVwap" /><span class="swatch" style="background:#f59e0b"></span>
-        <label for="iVwap">Advanced VWAP (session)</label></div>
+        <label for="iVwap">VWAP (session)</label></div>
+      <div class="indrow"><input type="checkbox" id="iBands" /><span class="swatch swatch-bands" aria-hidden="true"></span>
+        <label for="iBands" id="iBandsLabel">Advanced VWAP Bands (±2σ)</label></div>
+      <div class="indrow" style="padding-left:24px">
+        <label for="iBandsMult">Std-dev multiplier</label>
+        <input type="number" id="iBandsMult" min="0.1" max="10" step="0.1" inputmode="decimal"
+               aria-describedby="iBandsHint" />
+      </div>
+      <p class="hint" id="iBandsHint">Upper dashed, lower dotted, on the spot and the combo.
+        The centerline is VWAP (session). Chart only: no signal or P/L uses the bands.</p>
       <div class="indrow"><input type="checkbox" id="iEma1" /><span class="swatch" style="background:#22d3ee"></span>
         <label for="iEma1">EMA 1</label>
         <input type="number" id="iEma1Len" min="1" max="500" step="1" aria-label="EMA 1 length" /></div>
@@ -205,7 +219,13 @@ COMBO_HTML = r"""<!DOCTYPE html>
 const LWC = window.LightweightCharts;
 const $ = (id) => document.getElementById(id);
 const KEY = sessionStorage.getItem("mthKey") || "";
-const STORE = "matheranCombo.v1";
+/* Option Seller's combo screen (app shell) keeps its own choices; the original /combo
+   keeps the original key. The first visit copies the original. */
+const WS = (window.SAIDARSHAN_CONTEXT && window.SAIDARSHAN_CONTEXT.workspace) || null;
+const WS_STORE = window.SaidarshanStore || { key: (k) => k, migrate: () => false };
+WS_STORE.migrate("matheranCombo.v1");
+const STORE = WS_STORE.key("matheranCombo.v1");
+const wsq = (path) => (WS ? path + (path.indexOf("?") >= 0 ? "&" : "?") + "workspace=" + encodeURIComponent(WS) : path);
 const TIMEFRAMES = ["1m", "3m", "5m", "9m", "15m", "30m", "1h", "2h", "1D", "1W", "1M"];
 const TF_ALIAS = { "60m": "1h", "120m": "2h", "1d": "1D", "1w": "1W" };
 const normTf = (tf) => (TIMEFRAMES.includes(tf) ? tf : (TF_ALIAS[tf] || null));
@@ -215,8 +235,9 @@ const C = {
   callLine: "#22d3ee", callUp: "#14b8a6", callDown: "#be123c",
   putLine: "#e879f9", putUp: "#a855f7", putDown: "#f97316",
   vwap: "#f59e0b", ema1: "#22d3ee", ema2: "#e879f9", stUp: "#3fb950", stDown: "#f85149",
-  spotVwap: "#f2cc60", spotEma: "#58a6ff",
+  spotVwap: "#f2cc60", spotEma: "#58a6ff", bandUp: "#d97706", bandDown: "#0891b2",
 };
+const CLEAR = "rgba(0,0,0,0)";
 
 let state = load();
 let ADHOC = "";          // unsaved legs handed over by the option chain
@@ -229,13 +250,16 @@ function load() {
   const base = {
     basket: "", tf: "5m", range: "spot", comboStyle: "candles", cpStyle: "line", cp: "abs",
     pl: "points", refresh: 5000, sync: true, table: true,
-    ind: { vwap: true, ema1: true, ema1Len: 9, ema2: true, ema2Len: 21, st: true, stF: 3, stAtr: 10 },
+    ind: { vwap: true, ema1: true, ema1Len: 9, ema2: true, ema2Len: 21, st: true, stF: 3, stAtr: 10,
+           bands: false, bandsMult: 2 },
   };
   try {
     const s = JSON.parse(localStorage.getItem(STORE) || "null");
     if (s && typeof s === "object") {
       const out = { ...base, ...s, ind: { ...base.ind, ...(s.ind || {}) } };
       out.tf = normTf(out.tf) || "5m";
+      const m = Number(out.ind.bandsMult);
+      out.ind.bandsMult = Number.isFinite(m) && m >= 0.1 && m <= 10 ? m : 2;
       return out;
     }
   } catch (e) { /* defaults */ }
@@ -316,7 +340,7 @@ function makePane(key, cap) {
     autoSize: true,
   });
   P[key] = {
-    key, chart, main: null, style: "", lines: {}, lastTime: 0, loaded: false, hasData: false,
+    key, chart, main: null, style: "", lines: {}, marks: {}, lastTime: 0, loaded: false, hasData: false,
     emptyEl: host.querySelector(".empty"), lastEl: $("l" + cap), subEl: $("s" + cap), titleEl: $("t" + cap),
   };
   chart.timeScale().subscribeVisibleTimeRangeChange((range) => syncFrom(P[key], range));
@@ -376,11 +400,11 @@ function setBars(p, bars, emptyText) {
   p.lastEl.textContent = `${fmt(last.close)}  ${chg >= 0 ? "+" : ""}${fmt(chg)}`;
 }
 
-function lineOn(p, id, colour, width) {
+function lineOn(p, id, colour, width, extra) {
   if (!p.lines[id]) {
     p.lines[id] = p.chart.addSeries(LWC.LineSeries, {
       color: colour, lineWidth: width || 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false });
+      crosshairMarkerVisible: false, ...(extra || {}) });
   }
   return p.lines[id];
 }
@@ -388,18 +412,57 @@ function lineOff(p, id) {
   if (!p.lines[id]) return;
   try { p.chart.removeSeries(p.lines[id]); } catch (e) {}
   delete p.lines[id];
+  delete p.marks[id];
 }
 function setLine(p, id, points, colour, on, width) {
   if (!on || !points || !points.length) { lineOff(p, id); return; }
   lineOn(p, id, colour, width).setData(points.map((x) => ({ time: x.time, value: x.value })));
 }
-/* Supertrend in two series, one per trend side; a bare {time} breaks the line at a flip. */
+/* Advanced VWAP Bands: the upper band dashed, the lower dotted, each titled on the
+   price axis. The centerline is the plain VWAP line, drawn (or not) by its own toggle. */
+function setBands(p, id, points, on) {
+  if (!on || !points || !points.length) { lineOff(p, id + ":hi"); lineOff(p, id + ":lo"); return; }
+  const m = String(state.ind.bandsMult);
+  const hi = lineOn(p, id + ":hi", C.bandUp, 1, { lineStyle: LWC.LineStyle.LargeDashed, lastValueVisible: true });
+  const lo = lineOn(p, id + ":lo", C.bandDown, 1, { lineStyle: LWC.LineStyle.Dotted, lastValueVisible: true });
+  hi.applyOptions({ title: "+" + m + "σ" });
+  lo.applyOptions({ title: "−" + m + "σ" });
+  hi.setData(points.map((x) => ({ time: x.time, value: x.upper })));
+  lo.setData(points.map((x) => ({ time: x.time, value: x.lower })));
+}
+/* One side of a Supertrend, values on that side's bars and whitespace elsewhere. The
+   library joins a line across whitespace and paints each segment in its first point's
+   colour, so the last point of every run is transparent: the side ends cleanly at a
+   flip instead of drawing a connector across the other side's bars. */
+function trendSide(points, side) {
+  return points.map((x, i) => {
+    if (x.trend !== side) return { time: x.time };
+    const next = points[i + 1];
+    return next && next.trend !== side
+      ? { time: x.time, value: x.value, color: CLEAR } : { time: x.time, value: x.value };
+  });
+}
+/* Supertrend: uptrend solid, downtrend dashed, one value per bar. The latest bar gets a
+   dot on the active side and a price-axis label in words (▲ up / ▼ down). */
 function setTrend(p, id, points, on) {
-  if (!on || !points || !points.length) { lineOff(p, id + ":up"); lineOff(p, id + ":dn"); return; }
-  lineOn(p, id + ":up", C.stUp, 2).setData(points.map((x) =>
-    x.trend === -1 ? { time: x.time, value: x.value } : { time: x.time }));
-  lineOn(p, id + ":dn", C.stDown, 2).setData(points.map((x) =>
-    x.trend === -1 ? { time: x.time } : { time: x.time, value: x.value }));
+  const upId = id + ":up", dnId = id + ":dn";
+  if (!on || !points || !points.length) { lineOff(p, upId); lineOff(p, dnId); return; }
+  const up = lineOn(p, upId, C.stUp, 2, { lineStyle: LWC.LineStyle.Solid });
+  const dn = lineOn(p, dnId, C.stDown, 2, { lineStyle: LWC.LineStyle.Dashed });
+  up.setData(trendSide(points, -1));
+  dn.setData(trendSide(points, 1));
+  for (const [sid, series] of [[upId, up], [dnId, dn]]) {
+    const mark = p.marks[sid] || (p.marks[sid] = { markers: LWC.createSeriesMarkers(series, []), line: null });
+    if (mark.line) { try { series.removePriceLine(mark.line); } catch (e) {} mark.line = null; }
+    mark.markers.setMarkers([]);
+  }
+  const last = points[points.length - 1];
+  const isUp = last.trend === -1;
+  const sid = isUp ? upId : dnId, series = isUp ? up : dn, colour = isUp ? C.stUp : C.stDown;
+  p.marks[sid].markers.setMarkers([{ time: last.time, position: "atPriceMiddle", price: last.value,
+                                     shape: "circle", color: colour, size: 0.6 }]);
+  p.marks[sid].line = series.createPriceLine({ price: last.value, color: colour, lineVisible: false,
+    axisLabelVisible: true, title: "ST " + (isUp ? "▲ up" : "▼ down") });
 }
 
 /* Keep the four time axes together, by time rather than bar index: the legs and the
@@ -425,6 +488,7 @@ function comboQuery() {
     timeframe: state.tf, range: state.range, cp: state.cp,
     ema1: String(state.ind.ema1Len), ema2: String(state.ind.ema2Len),
     st_factor: String(state.ind.stF), st_atr: String(state.ind.stAtr),
+    vwap_mult: String(state.ind.bandsMult),
   });
   if (ADHOC) q.set("legs", ADHOC);
   else if (state.basket) q.set("basket", state.basket);
@@ -440,7 +504,7 @@ async function refresh(full) {
   const q = comboQuery();
   if (!q) {
     setStatus("no basket selected", true);
-    for (const p of Object.values(P)) setBars(p, [], "Save a basket on the console's Baskets tab or from the option chain, then pick it above.");
+    for (const p of Object.values(P)) setBars(p, [], "Save a basket in Option Seller › Basket or from the Option Chain, then pick it above.");
     return;
   }
   const mine = ++seq;
@@ -448,7 +512,7 @@ async function refresh(full) {
   const started = Date.now();
   if (full) setStatus("loading…");
   try {
-    const d = await api("/api/combo?" + q.toString());
+    const d = await api(wsq("/api/combo?" + q.toString()));
     if (mine !== seq) return;
     LAST = d;
     render(d);
@@ -459,7 +523,7 @@ async function refresh(full) {
   } catch (e) {
     if (mine !== seq) return;
     setStatus(e.message + (String(e.message).indexOf("X-API-Key") >= 0
-      ? "  →  open the console first and enter the dashboard password" : ""), true);
+      ? "  →  open Saidarshan (/app) first and enter the dashboard password" : ""), true);
     for (const p of Object.values(P)) if (!p.loaded) setBars(p, [], e.message);
   }
 }
@@ -467,7 +531,7 @@ async function refresh(full) {
 function render(d) {
   const legs = (d.table && d.table.legs) || [];
 
-  // Underlying spot, with the strategy's Advanced VWAP, EMA and Supertrend.
+  // Underlying spot, with the strategy's session VWAP, EMA and Supertrend.
   const sp = P.spot, spot = d.spot || {};
   ensureMain(sp, "candles", { up: C.up, down: C.down, line: C.comboLine });
   sp.titleEl.textContent = (spot.symbol || "").replace(/^idx:/, "").replace(/^eq:NSE:/, "") + " spot";
@@ -475,10 +539,11 @@ function render(d) {
   setBars(sp, spot.bars, spot.error || "no data for the underlying");
   const si = spot.indicators || {};
   setLine(sp, "vwap", si.vwap, C.spotVwap, true, 1);
+  setBands(sp, "bands", si.vwap_bands, state.ind.bands);
   setLine(sp, "ema", si.ema_price, C.spotEma, true, 1);
   setTrend(sp, "st", si.supertrend, true);
 
-  // Combined premium, with the script's Advanced VWAP, two EMAs and Supertrend.
+  // Combined premium, with the script's session VWAP, two EMAs and Supertrend.
   const cb = P.combo, ind = state.ind;
   ensureMain(cb, state.comboStyle, { up: C.up, down: C.down, line: C.comboLine });
   cb.titleEl.textContent = "Combo premium (points) · " + d.name;
@@ -489,6 +554,7 @@ function render(d) {
   setBars(cb, d.combo.bars, d.errors.length ? d.errors.join("; ") : "these legs have no data yet");
   const ci = d.combo.indicators || {};
   setLine(cb, "vwap", ci.vwap, C.vwap, ind.vwap, 2);
+  setBands(cb, "bands", ci.vwap_bands, ind.bands);
   setLine(cb, "ema1", ci.ema1, C.ema1, ind.ema1, 1);
   setLine(cb, "ema2", ci.ema2, C.ema2, ind.ema2, 1);
   setTrend(cb, "st", ci.supertrend, ind.st);
@@ -533,12 +599,13 @@ function renderTable(t) {
       <td>${num(pts ? g.value_points : g.value_rupees)}</td>
       <td class="${tone(pl)}">${num(pl)}</td></tr>`;
   };
+  // Leg rows, then the CALLS and PUTS summaries. The payload's TOTAL group is still
+  // computed and returned by /api/combo; it is only no longer drawn as a row here.
   box.innerHTML = `<table><caption class="sr">Combo legs, entries and P&amp;L</caption>
     <thead><tr><th class="l" scope="col">Strike</th><th class="l" scope="col">C/P</th>
       <th scope="col">Qty</th><th scope="col">Entry</th><th scope="col">LTP</th>
       <th scope="col">P/L ${pts ? "pts" : "₹"}</th></tr></thead>
-    <tbody>${rows.join("")}${group(t.calls, "calls", "Call")}${group(t.puts, "puts", "Put")}
-      ${group(t.total, "total", pts ? "Pts" : "Rs")}</tbody></table>`;
+    <tbody>${rows.join("")}${group(t.calls, "calls", "Call")}${group(t.puts, "puts", "Put")}</tbody></table>`;
   box.hidden = false;
 }
 
@@ -566,6 +633,12 @@ function applyControls() {
   $("iSt").checked = !!i.st;
   $("iEma1Len").value = i.ema1Len; $("iEma2Len").value = i.ema2Len;
   $("iStF").value = i.stF; $("iStAtr").value = i.stAtr;
+  $("iBands").checked = !!i.bands;
+  $("iBandsMult").value = i.bandsMult;
+  bandsLabel();
+}
+function bandsLabel() {
+  $("iBandsLabel").textContent = `Advanced VWAP Bands (±${state.ind.bandsMult}σ)`;
 }
 
 // A change of data needs a refetch; a change of what is drawn only needs a redraw.
@@ -580,7 +653,8 @@ $("pl").onchange = () => { state.pl = $("pl").value; redraw(); };
 $("showTbl").onchange = () => { state.table = $("showTbl").checked; redraw(); };
 $("sync").onchange = () => { state.sync = $("sync").checked; save(); };
 $("refresh").onchange = () => { state.refresh = Number($("refresh").value); save(); startTimer(); };
-for (const [id, key] of [["iVwap", "vwap"], ["iEma1", "ema1"], ["iEma2", "ema2"], ["iSt", "st"]]) {
+for (const [id, key] of [["iVwap", "vwap"], ["iBands", "bands"], ["iEma1", "ema1"], ["iEma2", "ema2"],
+                         ["iSt", "st"]]) {
   $(id).onchange = () => { state.ind[key] = $(id).checked; redraw(); };
 }
 for (const [id, key, lo, hi, whole] of [["iEma1Len", "ema1Len", 1, 500, true], ["iEma2Len", "ema2Len", 1, 500, true],
@@ -594,6 +668,23 @@ for (const [id, key, lo, hi, whole] of [["iEma1Len", "ema1Len", 1, 500, true], [
     refetch();
   };
 }
+// The band multiplier: 0.1 to 10 in steps of 0.1. A value outside that is refused
+// beside the field rather than silently clamped, and nothing is refetched.
+$("iBandsMult").onchange = () => {
+  const el = $("iBandsMult"), raw = el.value.trim(), v = Number(raw);
+  const ok = raw !== "" && Number.isFinite(v) && v >= 0.1 && v <= 10;
+  el.classList.toggle("bad", !ok);
+  el.setAttribute("aria-invalid", ok ? "false" : "true");
+  $("iBandsHint").textContent = ok
+    ? "Upper dashed, lower dotted, on the spot and the combo. The centerline is VWAP (session). " +
+      "Chart only: no signal or P/L uses the bands."
+    : "Enter a multiplier from 0.1 to 10, for example 2.";
+  if (!ok) return;
+  state.ind.bandsMult = Math.round(v * 10) / 10;
+  el.value = state.ind.bandsMult;
+  bandsLabel();
+  refetch();
+};
 $("basket").onchange = () => {
   const v = $("basket").value;
   if (v === "__adhoc") return;
@@ -609,7 +700,7 @@ document.addEventListener("click", (ev) => {
 
 async function loadBaskets() {
   let list = [];
-  try { list = (await api("/api/baskets")).baskets || []; } catch (e) { setStatus(e.message, true); }
+  try { list = (await api(wsq("/api/baskets"))).baskets || []; } catch (e) { setStatus(e.message, true); }
   const opts = [];
   if (ADHOC) opts.push(`<option value="__adhoc">Unsaved legs (from the option chain)</option>`);
   for (const b of list) {

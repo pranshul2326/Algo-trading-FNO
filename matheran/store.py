@@ -51,6 +51,24 @@ def _sides(value: Any) -> str:
     return text if text in {"LONG", "SHORT", "BOTH"} else "LONG"
 
 
+def _workspace(value: Any) -> str:
+    """A stored workspace id, or "" for a record from before workspaces (or one that
+    names something unknown, which then falls back to the legacy rule)."""
+    from .workspaces import WORKSPACES
+
+    text = str(value or "").strip()
+    return text if text in WORKSPACES else ""
+
+
+def _level(value: Any) -> float | None:
+    """A stored price level: a positive number, else None (not set)."""
+    try:
+        level = float(value)
+    except (TypeError, ValueError):
+        return None
+    return level if level > 0 else None
+
+
 def _instrument(data: dict) -> Instrument:
     fields = {f for f in Instrument.__dataclass_fields__}
     return Instrument(**{k: v for k, v in data.items() if k in fields})
@@ -198,6 +216,12 @@ class Store:
                                if str(data.get("exit_mode") or "").lower() in EXIT_MODES else ""),
                     signal_side=str(data.get("signal_side") or ""),
                     signal_at=_dt(data.get("signal_at")),
+                    # Absent on records from before workspaces; read as "" (legacy
+                    # rule), never filled in here.
+                    workspace=_workspace(data.get("workspace")),
+                    # Absent on older records: their stop and target are the % above.
+                    stop_loss_price=_level(data.get("stop_loss_price")),
+                    target_price=_level(data.get("target_price")),
                 )
                 if watch.state is WatchState.GTT_PENDING and watch.ticket is None:
                     # A GTT with no readable ticket has nothing left to trigger.

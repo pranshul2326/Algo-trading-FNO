@@ -196,6 +196,9 @@ class SignalResult:
     checks: dict[str, bool]
     reasons: list[str]
     snapshot: Snapshot
+    # The reason beside each failed check, by check name (the same texts as
+    # `reasons`), so a caller can say which condition failed. Not serialised.
+    why: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -225,6 +228,8 @@ class Approval:
     note: str = ""
     product: str = "INTRADAY"
     exit_mode: str = "both"
+    # The workspace whose watch raised it (workspaces.py); approvals are not persisted.
+    workspace: str = ""
 
     @property
     def capital(self) -> float:
@@ -258,6 +263,7 @@ class Approval:
             "status": self.status,
             "decided_at": self.decided_at.isoformat() if self.decided_at else None,
             "note": self.note,
+            "workspace": self.workspace,
         }
 
 
@@ -517,6 +523,10 @@ class Trade:
     # What exactly closed it, in words: which exit condition held, or the stop level.
     exit_note: str = ""
     product: str = "INTRADAY"
+    # The workspace that owned the watch when the trade closed (workspaces.py), or
+    # "legacy" for an old watch no workspace owns. Rows written before workspaces
+    # existed have no such key; the reader assigns them by the legacy rule.
+    workspace: str = ""
 
     @property
     def pnl(self) -> float:
@@ -548,6 +558,7 @@ class Trade:
             "exit_snapshot": self.exit_snapshot.as_dict() if self.exit_snapshot else None,
             "exit_note": self.exit_note,
             "product": self.product,
+            "workspace": self.workspace,
         }
 
 
@@ -605,6 +616,13 @@ class Watch:
     # Which side last_signal was evaluated for (a BOTH watch checks both), and when.
     signal_side: str = ""
     signal_at: datetime | None = None
+    # The workspace that owns it (workspaces.py). "" on a record from before
+    # workspaces: it is then assigned by the legacy rule when read, never rewritten.
+    workspace: str = ""
+    # A stop and/or target given as a price rather than a % of the entry (one-way
+    # watches only). None = the % above; stop_loss_pct stays as the fallback.
+    stop_loss_price: float | None = None
+    target_price: float | None = None
 
     def touch(self) -> None:
         self.updated_at = now_ist()
@@ -643,6 +661,9 @@ class Watch:
             "exit_mode": self.exit_mode,
             "signal_side": self.signal_side,
             "signal_at": self.signal_at.isoformat() if self.signal_at else None,
+            "workspace": self.workspace,
+            "stop_loss_price": self.stop_loss_price,
+            "target_price": self.target_price,
         }
 
 
@@ -696,6 +717,9 @@ class OptionRow:
     reasons: list[str]
     oi: OiStats = field(default_factory=OiStats)
     error: str = ""
+    # The Option Scan's conditions for this row: id, on (required), timeframe, met,
+    # reason. Empty for rows that could not be evaluated.
+    conditions: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         snap = self.snapshot
@@ -725,6 +749,7 @@ class OptionRow:
             "reasons": self.reasons,
             **self.oi.as_dict(),
             "error": self.error,
+            "conditions": self.conditions,
         }
 
 

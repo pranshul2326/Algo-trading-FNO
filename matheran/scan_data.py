@@ -635,7 +635,7 @@ def _hhmmss(iso) -> str:
 
 
 def busy_text(holder: dict) -> str:
-    return (f"a scan is running in another Matheran process (pid {holder.get('pid')}, "
+    return (f"a scan is running in another Saidarshan process (pid {holder.get('pid')}, "
             f"started {_hhmmss(holder.get('started'))})")
 
 

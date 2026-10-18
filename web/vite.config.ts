@@ -11,6 +11,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: resolve(root, "index.html"),
+        app: resolve(root, "app/index.html"),
         charts: resolve(root, "charts/index.html"),
         chain: resolve(root, "chain/index.html"),
         combo: resolve(root, "combo/index.html"),

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import secrets as secrets_mod
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from datetime import datetime
 
@@ -28,7 +29,7 @@ from .combo import build as build_combo
 from .combo_page import COMBO_HTML
 from .config import Config, load_config
 from .dashboard import DASHBOARD_HTML
-from .engine import ACTIVE_STATES, Engine, EngineError
+from .engine import ACTIVE_STATES, WATCH_TIMEFRAMES, Engine, EngineError
 from .models import (
     EXIT_MODES,
     PRODUCTS,
@@ -46,7 +47,12 @@ from .rules import effective_rules, explain, legacy_rules, normalize_rules
 from .options import (
     BUILDUP_MINUTES,
     MAX_CHAIN_STRIKES_EACH_SIDE,
+    SCAN_CONDITION_IDS,
+    SCAN_CONDITIONS,
+    SCAN_DEFAULT_ON,
+    ScanCondition,
     active_expiries,
+    default_scan_conditions,
     oi_chain,
     scan_chain,
     select_chain,
@@ -57,6 +63,8 @@ from .scanner import ScanBusy, ScanIdle, ScanManager, ScanRefused, ScanSpec
 from .settings import CREDENTIAL_KEYS, SettingsManager, generate_api_key
 from .store import Store
 from .universes import UNIVERSE_IDS, UniverseUnavailable
+from . import workspaces as ws_mod
+from .app_pages import NOT_FOUND_HTML, landing_html, page_in_shell, shell_html
 
 log = logging.getLogger(__name__)
 
@@ -130,7 +138,62 @@ class TradeChoices(BaseModel):
         return None if v is None or not str(v).strip() else normalize_candle_type(v)
 
 
-class CreateWatch(TradeChoices):
+def _ws_field(v: str | None) -> str | None:
+    return ws_mod.normalize(v)
+
+
+def _level_unit(v: str | None) -> str:
+    unit = str(v or "pct").strip().lower()
+    if unit not in SL_UNITS:
+        raise ValueError("unit must be pct or price")
+    return unit
+
+
+class OrderLevels(BaseModel):
+    """A manual order's own stop and target. Leave them out for the watch's own;
+    send target_value null to place this order without a target."""
+
+    sl_value: float | None = Field(
+        None, gt=0, description="Stop loss for this order; blank = the watch's own"
+    )
+    sl_unit: str = Field("pct", description="pct of the entry, or price")
+    target_value: float | None = Field(
+        None, gt=0, description="Target for this order; omit for the watch's own, null for none"
+    )
+    target_unit: str = Field("pct", description="pct of the entry, or price")
+
+    @field_validator("sl_unit", "target_unit")
+    @classmethod
+    def _units(cls, v: str) -> str:
+        return _level_unit(v)
+
+    def levels(self) -> dict:
+        """The engine's enter_now keywords for these levels."""
+        return {
+            "sl_value": self.sl_value,
+            "sl_unit": self.sl_unit,
+            "target_value": self.target_value,
+            "target_unit": self.target_unit,
+            "target_given": "target_value" in self.model_fields_set,
+        }
+
+
+class Owned(BaseModel):
+    """The workspace a new record belongs to: stock_intraday, option_buyer or
+    option_seller. Callers that send none get the legacy assignment rule."""
+
+    workspace: str | None = Field(
+        None, description="stock_intraday, option_buyer or option_seller; blank = assigned "
+        "from the instrument and side, as for records from before workspaces",
+    )
+
+    @field_validator("workspace")
+    @classmethod
+    def _ws(cls, v: str | None) -> str | None:
+        return _ws_field(v)
+
+
+class CreateWatch(TradeChoices, Owned):
     symbol: str = Field(..., description="Trading symbol, e.g. RELIANCE")
     exchange: str = Field("NSE", description="NSE or BSE")
     quantity: int = Field(..., gt=0, description="Number of shares to trade on approval")
@@ -148,7 +211,21 @@ class CreateWatch(TradeChoices):
         None, gt=0, lt=100, description="Defaults to risk.stop_loss_pct (3%)"
     )
     target_pct: float | None = Field(None, gt=0, description="Optional take-profit")
+    stop_loss_price: float | None = Field(
+        None, gt=0, description="Stop as a price instead of a % (LONG or SHORT watches)"
+    )
+    target_price: float | None = Field(
+        None, gt=0, description="Target as a price instead of a % (LONG or SHORT watches)"
+    )
     notes: str = ""
+
+    @model_validator(mode="after")
+    def _one_unit(self):
+        if self.stop_loss_pct is not None and self.stop_loss_price is not None:
+            raise ValueError("give stop_loss_pct or stop_loss_price, not both")
+        if self.target_pct is not None and self.target_price is not None:
+            raise ValueError("give target_pct or target_price, not both")
+        return self
 
     @field_validator("symbol")
     @classmethod
@@ -172,7 +249,7 @@ class CreateWatch(TradeChoices):
         return v
 
 
-class CreateOptionWatch(TradeChoices):
+class CreateOptionWatch(TradeChoices, Owned):
     security_id: str | None = Field(
         None, description="Exact contract id from the chain table; skips the lookup below"
     )
@@ -203,7 +280,10 @@ class RejectBody(BaseModel):
     note: str = ""
 
 
-class BuyBody(TradeChoices):
+class BuyBody(TradeChoices, Owned, OrderLevels):
+    """`workspace`, when given, must be the one owning the watch or basket: a stale
+    view of another workspace can then never act on it."""
+
     confirm: bool = Field(
         False, description="Required in live mode; this sends a real order"
     )
@@ -237,8 +317,9 @@ class BuyBody(TradeChoices):
         return v
 
 
-class OptionBuyBody(CreateOptionWatch):
-    """Create an option watch and buy it immediately."""
+class OptionBuyBody(CreateOptionWatch, OrderLevels):
+    """Create an option watch and buy it immediately. sl_* / target_* set this
+    order's own stop and target; the watch keeps stop_loss_pct / target_pct."""
 
     confirm: bool = Field(False, description="Required in live mode")
     order_type: str = Field("MARKET", description="MARKET or LIMIT")
@@ -279,7 +360,9 @@ class BasketLegBody(BaseModel):
         return v
 
 
-class CreateBasket(TradeChoices):
+class CreateBasket(TradeChoices, Owned):
+    """A basket belongs to Option Seller unless `workspace` says otherwise."""
+
     name: str = Field("basket", max_length=60)
     legs: list[BasketLegBody] = Field(..., min_length=1, max_length=10)
     timeframe_minutes: int = 5
@@ -413,6 +496,21 @@ class ExitRulesBody(BaseModel):
     )
 
 
+class WorkspaceSettingsBody(BaseModel):
+    """One workspace's own settings. Omitted sections are left as they are."""
+
+    strategy: dict | None = None
+    risk: dict | None = None
+    defaults: dict | None = None
+
+
+class WorkspaceResetBody(BaseModel):
+    parts: list[str] = Field(
+        ..., min_length=1,
+        description="Any of strategy, risk, defaults: follow the top-level sections again",
+    )
+
+
 class ScanRulesBody(BaseModel):
     """Scanner rows to read back. null = the saved rows, else the defaults (BUY), the
     mirror of BUY (SELL), linked iff no SELL rows are saved (sell_linked)."""
@@ -470,8 +568,8 @@ class ScanRequest(ScanRulesBody):
         return v
 
 
-class ChartTradeBody(TradeChoices):
-    """A manual order from a chart pane."""
+class ChartTradeBody(TradeChoices, Owned):
+    """A manual order from a chart pane. `workspace` is the chart's own."""
 
     symbol: str = Field(
         ..., description="Chart symbol id, e.g. opt:NIFTY:2026-10-06:25000:CE or eq:NSE:SBIN"
@@ -603,8 +701,9 @@ def create_app(
         )
     if not cfg.secrets.api_key:
         log.warning(
-            "no MATHERAN_API_KEY set - running unauthenticated on %s. Set one from the "
-            "Setup tab; it is mandatory for any non-loopback bind.",
+            "no MATHERAN_API_KEY set - running unauthenticated on %s. Set the Saidarshan "
+            "dashboard password in System settings (/app/system); it is mandatory for any "
+            "non-loopback bind.",
             cfg.server.host,
         )
 
@@ -612,7 +711,7 @@ def create_app(
     async def lifespan(app: FastAPI):
         await engine.start()
         log.info(
-            "matheran up: mode=%s broker=%s data=%s",
+            "saidarshan up: mode=%s broker=%s data=%s",
             cfg.mode,
             engine.broker.name,
             getattr(engine.broker, "data_source", engine.broker.name),
@@ -626,11 +725,12 @@ def create_app(
                 await engine.stop()
 
     app = FastAPI(
-        title="Matheran trading API",
+        title="Saidarshan trading API",
         version="0.1.0",
         description=(
-            "Advanced VWAP + RSI/EMA + Supertrend intraday engine for NSE/BSE equity and index "
-            "options. Every entry waits for your explicit approval."
+            "Session VWAP + RSI/EMA + Supertrend intraday engine for NSE/BSE equity and index "
+            "options, organised in three workspaces (Stock Intraday, Option Buyer, Option "
+            "Seller). Every entry waits for your explicit approval."
         ),
         lifespan=lifespan,
     )
@@ -707,8 +807,24 @@ def create_app(
             "ticks": engine.tick_count,
         }
 
+    def _ws_query(value: str | None, *, allow_legacy: bool = False) -> str | None:
+        """A workspace query parameter: an id or slug, or None when not given."""
+        try:
+            return ws_mod.normalize(value, allow_legacy=allow_legacy)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    WS_QUERY = Query(
+        None, description="stock_intraday, option_buyer or option_seller; blank = the "
+        "top-level settings, as before workspaces",
+    )
+
     @app.get("/api/status", tags=["control"], dependencies=auth)
-    async def status():
+    async def status(workspace: str | None = WS_QUERY):
+        """Engine state (global), with the strategy and risk blocks of `workspace`."""
+        ws = _ws_query(workspace)
+        strategy = cfg.strategy_for(ws)
+        risk = cfg.risk_for(ws)
         payload = engine.status()
         try:
             payload["broker_health"] = await engine.broker.health()
@@ -718,35 +834,107 @@ def create_app(
         payload["authenticated"] = bool(cfg.secrets.api_key)
         payload["live_orders_supported"] = engine.broker.supports_live_orders
         payload["strategy"] = {
-            "timeframe_minutes": cfg.strategy.timeframe_minutes,
-            "rsi_period": cfg.strategy.rsi_period,
-            "rsi_signal_entry_period": cfg.strategy.rsi_signal_entry_period,
-            "rsi_signal_exit_period": cfg.strategy.rsi_signal_exit_period,
-            "supertrend": [cfg.strategy.supertrend_period, cfg.strategy.supertrend_factor],
-            "adx_period": cfg.strategy.adx_period,
-            "adx_min": cfg.strategy.adx_min,
-            "entry_condition_mode": cfg.strategy.entry_condition_mode,
-            "warmup_bars": cfg.strategy.warmup_bars(),
-            "exit_rules": explain(effective_rules(cfg.strategy)),
+            "timeframe_minutes": strategy.timeframe_minutes,
+            "rsi_period": strategy.rsi_period,
+            "rsi_signal_entry_period": strategy.rsi_signal_entry_period,
+            "rsi_signal_exit_period": strategy.rsi_signal_exit_period,
+            "supertrend": [strategy.supertrend_period, strategy.supertrend_factor],
+            "adx_period": strategy.adx_period,
+            "adx_min": strategy.adx_min,
+            "entry_condition_mode": strategy.entry_condition_mode,
+            "warmup_bars": strategy.warmup_bars(),
+            "exit_rules": explain(effective_rules(strategy)),
         }
         payload["risk"] = {
-            "stop_loss_pct": cfg.risk.stop_loss_pct,
-            "target_pct": cfg.risk.target_pct,
-            "place_stop_at_broker": cfg.risk.place_stop_at_broker,
-            "allow_manual_buy": cfg.risk.allow_manual_buy,
-            "exit_mode": cfg.risk.exit_mode,
-            "trail_profit_trigger_pct": cfg.risk.trail_profit_trigger_pct,
-            "trail_profit_value": cfg.risk.trail_profit_value,
-            "trail_profit_unit": cfg.risk.trail_profit_unit,
-            "default_product": cfg.engine.default_product,
+            "stop_loss_pct": risk.stop_loss_pct,
+            "target_pct": risk.target_pct,
+            "place_stop_at_broker": risk.place_stop_at_broker,
+            "allow_manual_buy": risk.allow_manual_buy,
+            "exit_mode": risk.exit_mode,
+            "trail_profit_trigger_pct": risk.trail_profit_trigger_pct,
+            "trail_profit_value": risk.trail_profit_value,
+            "trail_profit_unit": risk.trail_profit_unit,
+            "default_product": cfg.defaults_for(ws).get("product") or cfg.engine.default_product,
             "max_trades_per_day": cfg.engine.max_trades_per_day,
             "max_open_positions": cfg.engine.max_open_positions,
             "square_off_time": cfg.engine.square_off_time,
             "no_new_entry_after": cfg.engine.no_new_entry_after,
         }
         payload["timeframes"] = timeframes.info()
-        payload["has_exit_rules"] = bool(effective_rules(cfg.strategy))
+        payload["has_exit_rules"] = bool(effective_rules(strategy))
+        if ws:
+            payload["workspace"] = ws
+            payload["workspace_defaults"] = dict(cfg.defaults_for(ws))
         return payload
+
+    # ------------------------------------------------------------- workspaces
+    def _workspace_payload(ws: str) -> dict:
+        snap = settings.workspace_snapshot(ws)
+        strategy = cfg.strategy_for(ws)
+        rows = effective_rules(strategy)
+        schema = ws_mod.defaults_schema(cfg)[ws]
+        return {
+            **snap,
+            "slug": ws_mod.WORKSPACES[ws]["slug"],
+            "views": next(n["views"] for n in ws_mod.navigation() if n["id"] == ws),
+            "defaults_schema": [f.as_dict() for f in schema],
+            "exit_rules": {
+                "catalog": rules_catalog(),
+                "rules": rows,
+                "customised": strategy.exit_rules is not None,
+                **explain(rows),
+            },
+            "has_exit_rules": bool(rows),
+        }
+
+    @app.get("/api/workspaces", tags=["workspaces"], dependencies=auth)
+    async def list_workspaces():
+        """The three workspaces in order, with their child views and own settings.
+
+        Global controls (mode, broker, credentials, halt, the engine caps and session
+        times) are not here: they apply to all workspaces and live under /api/settings.
+        """
+        return {
+            "workspaces": [_workspace_payload(ws) for ws in ws_mod.WORKSPACE_IDS],
+            "legacy": ws_mod.LEGACY,
+            "global_note": "Mode, broker, credentials, Halt / Resume and the engine caps "
+                           "apply to all workspaces.",
+        }
+
+    @app.get("/api/workspaces/{workspace}", tags=["workspaces"], dependencies=auth)
+    async def get_workspace(workspace: str):
+        ws = _ws_query(workspace)
+        if ws is None:
+            raise HTTPException(404, "no such workspace")
+        return _workspace_payload(ws)
+
+    # Writes live under /api/settings/ with the other config changes: loopback only here,
+    # and inside the path a reverse proxy already refuses (deploy/lightsail/Caddyfile).
+    @app.put("/api/settings/workspaces/{workspace}", tags=["workspaces"],
+             dependencies=auth_local)
+    async def put_workspace_settings(workspace: str, body: WorkspaceSettingsBody):
+        """Save this workspace's strategy, risk and/or setup defaults, and only its own.
+
+        Persisted under workspaces.<id> in config.yaml; validated like the top-level
+        sections. Takes effect on the workspace's watches at their next evaluation.
+        """
+        ws = _ws_query(workspace)
+        if ws is None:
+            raise HTTPException(404, "no such workspace")
+        patch = body.model_dump(exclude_none=True)
+        if not patch:
+            raise HTTPException(400, "nothing to save: send strategy, risk or defaults")
+        settings.update_workspace(ws, patch)
+        return _workspace_payload(ws)
+
+    @app.post("/api/settings/workspaces/{workspace}/reset", tags=["workspaces"],
+              dependencies=auth_local)
+    async def reset_workspace_settings(workspace: str, body: WorkspaceResetBody):
+        ws = _ws_query(workspace)
+        if ws is None:
+            raise HTTPException(404, "no such workspace")
+        settings.reset_workspace(ws, body.parts)
+        return _workspace_payload(ws)
 
     # --------------------------------------------------------------- settings
     def _exit_rules_payload() -> dict:
@@ -793,14 +981,16 @@ def create_app(
         return payload
 
     @app.post("/api/strategy/exit-rules/preview", tags=["settings"], dependencies=auth)
-    async def preview_exit_rules(body: ExitRulesBody):
+    async def preview_exit_rules(body: ExitRulesBody, workspace: str | None = WS_QUERY):
         """Validate exit condition rows and read them back in words, long and short.
 
-        Nothing is saved; send the rows to /api/settings/config as strategy.exit_rules
-        to apply them.
+        Nothing is saved; send the rows to /api/settings/workspaces/{id} (or, for the
+        top-level settings, /api/settings/config) as strategy.exit_rules to apply them.
+        null rows read back the default two of `workspace`'s strategy.
         """
         rows = normalize_rules(body.rules)
-        effective = rows if rows is not None else legacy_rules(cfg.strategy)
+        strategy = cfg.strategy_for(_ws_query(workspace))
+        effective = rows if rows is not None else legacy_rules(strategy)
         return {"rules": effective, "customised": rows is not None, **explain(effective)}
 
     @app.put("/api/settings/credentials", tags=["settings"], dependencies=auth_local)
@@ -882,32 +1072,53 @@ def create_app(
                 "charting remains available. No watch was created.",
             )
         instrument = await engine.broker.resolve_equity(body.symbol, body.exchange)
+        owner = ws_mod.for_new(body.workspace, instrument, body.direction)
         watch = await engine.add_watch(
             instrument=instrument,
             quantity=body.quantity,
             timeframe_minutes=body.timeframe_minutes,
             stop_loss_pct=body.stop_loss_pct,
             target_pct=body.target_pct,
+            stop_loss_price=body.stop_loss_price,
+            target_price=body.target_price,
             kind="equity",
             direction=body.direction,
-            require_adx=cfg.strategy.require_adx,
+            require_adx=cfg.strategy_for(owner).require_adx,
             notes=body.notes,
             product=body.product,
             exit_mode=body.exit_mode,
             candle_type=body.candle_type,
+            workspace=owner,
         )
-        return watch.as_dict()
+        return _owned_row(watch.as_dict(), watch)
+
+    def _owned_row(row: dict, record) -> dict:
+        """A record as listed: its stored `workspace` (blank on legacy records), plus
+        the workspace it is shown under and whether the record or the rule said so."""
+        effective = ws_mod.of_watch(record)
+        return {**row, "workspace_effective": effective,
+                "workspace_label": ws_mod.label_of(effective),
+                "workspace_assigned_by": ws_mod.assigned_by(record)}
+
+    def _watch_scope(w, ws: str | None) -> bool:
+        return ws is None or ws_mod.of_watch(w) == ws
 
     @app.get("/api/watches", tags=["watches"], dependencies=auth)
-    async def list_watches():
-        watches = list(engine.watches.values())
+    async def list_watches(
+        workspace: str | None = Query(
+            None, description="Only this workspace's watches (legacy = unclassified); "
+            "blank = every watch, as before workspaces",
+        ),
+    ):
+        ws = _ws_query(workspace, allow_legacy=True)
+        watches = [w for w in engine.watches.values() if _watch_scope(w, ws)]
         prices = await engine._fetch_prices(watches) if watches else {}
         rows = []
         for w in watches:
             ltp = prices.get(w.instrument.security_id)
-            rows.append({**w.as_dict(ltp), "ltp": ltp,
-                         "effective_exit_mode": engine.exit_mode_for(w)})
-        return {"count": len(watches), "watches": rows}
+            rows.append(_owned_row({**w.as_dict(ltp), "ltp": ltp,
+                                    "effective_exit_mode": engine.exit_mode_for(w)}, w))
+        return {"count": len(watches), "watches": rows, "workspace": ws}
 
     @app.get("/api/watches/{watch_id}", tags=["watches"], dependencies=auth)
     async def get_watch(watch_id: str):
@@ -955,6 +1166,12 @@ def create_app(
         """
         body = body or BuyBody()
         watch = engine.watches.get(watch_id)
+        if watch is not None and body.workspace and ws_mod.of_watch(watch) != body.workspace:
+            raise HTTPException(
+                409,
+                f"this watch belongs to {ws_mod.label_of(ws_mod.of_watch(watch))}, not "
+                f"{ws_mod.label_of(body.workspace)}; nothing was sent",
+            )
         if body.direction:
             side = Direction(body.direction).entry_side.value
         elif watch is not None and watch.sides in {"LONG", "SHORT"}:
@@ -974,6 +1191,7 @@ def create_app(
             limit_price=body.limit_price,
             product=body.product,
             exit_mode=body.exit_mode,
+            **body.levels(),
         )
 
     # Kept so existing clients and bookmarks do not break.
@@ -1032,7 +1250,7 @@ def create_app(
     ):
         """ATM plus seven strikes on each side as paired CE+PE premiums.
 
-        Change is against the previous session close. Advanced VWAP, EMA(21), and
+        Change is against the previous session close. Session VWAP, EMA(21), and
         Supertrend(21, 0.618) are calculated on closed straddle candles.
         """
         from .options import STRADDLE_STRIKES_EACH_SIDE, straddle_table
@@ -1064,7 +1282,41 @@ def create_app(
         reference: str = Query("index", pattern="^(index|future)$"),
         adx_min: float | None = Query(None),
         candle_type: str = Query("normal", pattern="^(normal|heikin_ashi)$"),
+        workspace: str | None = WS_QUERY,
+        # Which conditions READY needs (all ticked ones) and the timeframe each reads;
+        # omitted = the engine's entry gate on timeframe_minutes.
+        vwap_on: bool | None = Query(None), vwap_tf: int | None = Query(None),
+        rsi_on: bool | None = Query(None), rsi_tf: int | None = Query(None),
+        ema_on: bool | None = Query(None), ema_tf: int | None = Query(None),
+        st_on: bool | None = Query(None), st_tf: int | None = Query(None),
+        adx_on: bool | None = Query(None), adx_tf: int | None = Query(None),
+        # Indicator periods for this scan; omitted = the workspace's strategy settings.
+        rsi_period: int | None = Query(None, ge=2, le=200),
+        rsi_signal_period: int | None = Query(None, ge=1, le=200),
+        ema_period: int | None = Query(None, ge=1, le=500),
+        st_period: int | None = Query(None, ge=1, le=200),
+        st_factor: float | None = Query(None, ge=0.01, le=20),
+        adx_period: int | None = Query(None, ge=2, le=100),
     ):
+        """The ATM / OTM scan table, on `workspace`'s strategy settings (Option Buyer's
+        from its Option Scan view).
+
+        The *_on / *_tf parameters choose the conditions a READY row needs and the
+        timeframe each reads, and the *_period / st_factor ones the indicator periods,
+        for this scan only: watches keep waiting for the strategy's own entry gate."""
+        given = {"vwap": (vwap_on, vwap_tf), "rsi": (rsi_on, rsi_tf), "ema": (ema_on, ema_tf),
+                 "supertrend": (st_on, st_tf), "adx": (adx_on, adx_tf)}
+        conditions = []
+        for cid in SCAN_CONDITION_IDS:
+            on, tf = given[cid]
+            if tf and tf not in WATCH_TIMEFRAMES:
+                raise HTTPException(400, f"{cid} timeframe must be one of "
+                                    + ", ".join(str(m) for m in WATCH_TIMEFRAMES))
+            conditions.append(ScanCondition(
+                cid, SCAN_DEFAULT_ON[cid] if on is None else on, int(tf or timeframe_minutes)))
+        if not any(c.on for c in conditions):
+            raise HTTPException(400, "tick at least one condition for READY")
+
         name = (underlying or cfg.options.default_underlying).upper()
         selection = await select_chain(
             engine.broker,
@@ -1073,13 +1325,28 @@ def create_app(
             otm_count=otm if otm is not None else cfg.options.otm_count,
             reference=reference,
         )
+        strategy = cfg.strategy_for(_ws_query(workspace))
+        periods = {
+            "rsi_period": rsi_period, "rsi_signal_entry_period": rsi_signal_period,
+            "price_ema_period": ema_period, "supertrend_period": st_period,
+            "supertrend_factor": st_factor, "adx_period": adx_period,
+        }
+        # Only what differs from the workspace's own settings counts as an edit.
+        periods = {k: v for k, v in periods.items()
+                   if v is not None and v != getattr(strategy, k)}
+        if periods:
+            # A copy for this scan: the workspace's saved settings are not touched.
+            strategy = copy.deepcopy(strategy)
+            for key, value in periods.items():
+                setattr(strategy, key, value)
         rows = await scan_chain(
             engine.broker,
             selection,
-            cfg.strategy,
+            strategy,
             timeframe_minutes=timeframe_minutes,
             adx_min=adx_min,
             candle_type=candle_type,
+            conditions=conditions,
         )
         table = [r.as_dict() for r in rows]
         return {
@@ -1092,12 +1359,28 @@ def create_app(
             "strike_step": selection.strike_step,
             "timeframe_minutes": timeframe_minutes,
             "candle_type": candle_type,
-            "adx_min": adx_min if adx_min is not None else cfg.strategy.adx_min,
+            "adx_min": adx_min if adx_min is not None else strategy.adx_min,
             "missing_legs": selection.missing,
             "expires_today": selection.expires_today,
             "rows": table,
             "above_vwap": [r["security_id"] for r in table if r["price_above_vwap"]],
             "entry_ready": [r["security_id"] for r in table if r["entry_ready"]],
+            # What READY meant for this scan, and whether it was the strategy's own gate.
+            "conditions": [
+                {"id": c.id, "label": dict(SCAN_CONDITIONS)[c.id], "on": c.on,
+                 "timeframe_minutes": c.timeframe_minutes}
+                for c in conditions
+            ],
+            "periods": {
+                "rsi_period": strategy.rsi_period,
+                "rsi_signal_period": strategy.rsi_signal_entry_period,
+                "ema_period": strategy.price_ema_period,
+                "st_period": strategy.supertrend_period,
+                "st_factor": strategy.supertrend_factor,
+                "adx_period": strategy.adx_period,
+            },
+            "strategy_gate": conditions == default_scan_conditions(timeframe_minutes)
+                             and not periods,
         }
 
     async def _resolve_option(body: CreateOptionWatch):
@@ -1178,12 +1461,14 @@ def create_app(
             product=body.product,
             exit_mode=body.exit_mode,
             candle_type=body.candle_type,
+            # A bought contract: Option Buyer unless the caller names another owner.
+            workspace=body.workspace,
         )
 
     @app.post("/api/options/watches", tags=["options"], dependencies=auth, status_code=201)
     async def create_option_watch(body: CreateOptionWatch):
         watch = await _add_option_watch(body)
-        return watch.as_dict()
+        return _owned_row(watch.as_dict(), watch)
 
     @app.post("/api/options/buy", tags=["options"], dependencies=auth, status_code=201)
     async def buy_option(body: OptionBuyBody):
@@ -1213,6 +1498,15 @@ def create_app(
             )
             if watch is None:
                 raise
+            owner = body.workspace or ws_mod.for_new(None, instrument, "LONG")
+            if ws_mod.of_watch(watch) != owner:
+                # Re-using another workspace's watch would open the position there.
+                raise HTTPException(
+                    409,
+                    f"{instrument.symbol} is watched in "
+                    f"{ws_mod.label_of(ws_mod.of_watch(watch))} (watch {watch.id}); buy it "
+                    "there, or remove that watch first. Nothing was sent.",
+                ) from None
         return await engine.enter_now(
             watch.id,
             note=body.notes or "manual entry from options",
@@ -1220,6 +1514,7 @@ def create_app(
             limit_price=body.limit_price,
             product=body.product,
             exit_mode=body.exit_mode,
+            **body.levels(),
         )
 
     # ---------------------------------------------------------------- baskets
@@ -1319,8 +1614,14 @@ def create_app(
         return data
 
     @app.get("/api/baskets", tags=["baskets"], dependencies=auth)
-    async def list_baskets():
-        items = baskets.all()
+    async def list_baskets(
+        workspace: str | None = Query(
+            None, description="Only this workspace's baskets (baskets from before "
+            "workspaces belong to option_seller); blank = all",
+        ),
+    ):
+        ws = _ws_query(workspace)
+        items = [b for b in baskets.all() if ws is None or ws_mod.of_basket(b) == ws]
         watches = [w for b in items for w in map(_leg_watch, b.legs) if w is not None]
         # Legs of baskets not armed or executed yet have no watch; their instruments are
         # resolved so the card can still show prices and the premium.
@@ -1342,8 +1643,9 @@ def create_app(
             except BrokerError as exc:
                 log.warning("baskets: could not price unarmed legs: %s", exc)
         trades = store.load_trades(2000) if watches else []
-        rows = [_basket_view(b, prices, trades, unwatched) for b in items]
-        return {"count": len(rows), "baskets": rows}
+        rows = [{**_basket_view(b, prices, trades, unwatched),
+                 "workspace_effective": ws_mod.of_basket(b)} for b in items]
+        return {"count": len(rows), "baskets": rows, "workspace": ws}
 
     @app.post("/api/baskets", tags=["baskets"], dependencies=auth, status_code=201)
     async def create_basket(body: CreateBasket):
@@ -1377,6 +1679,7 @@ def create_app(
                     label=item.label.strip() or instrument.symbol,
                 )
             )
+        owner = body.workspace or ws_mod.OPTION_SELLER
         basket = baskets.create(
             name=body.name,
             legs=legs,
@@ -1384,11 +1687,13 @@ def create_app(
             stop_loss_pct=body.stop_loss_pct,
             target_pct=body.target_pct,
             notes=body.notes,
-            product=body.product or cfg.engine.default_product,
+            product=body.product or cfg.defaults_for(owner).get("product")
+            or cfg.engine.default_product,
             exit_mode=body.exit_mode or "",
+            workspace=owner,
         )
         _persist_baskets()
-        return basket.as_dict()
+        return {**basket.as_dict(), "workspace_effective": owner}
 
     @app.delete("/api/baskets/{basket_id}", tags=["baskets"], dependencies=auth)
     async def delete_basket(basket_id: str, force: bool = Query(False)):
@@ -1472,6 +1777,8 @@ def create_app(
                 notes=f"{basket.name}: {leg.label or leg.symbol}",
                 product=basket.product,
                 exit_mode=basket.exit_mode or None,
+                # Every leg belongs where its basket does.
+                workspace=ws_mod.of_basket(basket),
             )
             leg.watch_id = watch.id
             created.append(watch.id)
@@ -1657,6 +1964,13 @@ def create_app(
         """
         body = body or ExecuteBasketBody()
         basket = baskets.get(basket_id)
+        owner = ws_mod.of_basket(basket)
+        if body.workspace and body.workspace != owner:
+            raise HTTPException(
+                409,
+                f"this basket belongs to {ws_mod.label_of(owner)}, not "
+                f"{ws_mod.label_of(body.workspace)}; no leg was sent",
+            )
         if basket.state == "uncertain":
             raise HTTPException(
                 409,
@@ -1679,7 +1993,7 @@ def create_app(
                 f"live mode: this sends {len(basket.legs)} REAL orders. "
                 "Resend with confirm: true.",
             )
-        if not cfg.risk.allow_manual_buy:
+        if not cfg.risk_for(owner).allow_manual_buy:
             raise HTTPException(
                 400, "manual entry is disabled (risk.allow_manual_buy); no leg was sent"
             )
@@ -1706,6 +2020,7 @@ def create_app(
                 engine._check_trade_settings(
                     leg_watch.instrument, leg.direction.value, product,
                     body.exit_mode or engine.exit_mode_for(leg_watch),
+                    strategy=engine._strategy(leg_watch),
                 )
             except EngineError as exc:
                 raise HTTPException(
@@ -2040,13 +2355,30 @@ def create_app(
         return {"basket": basket.as_dict(), "legs": results}
 
     # -------------------------------------------------------------- approvals
+    def _approval_scope(a) -> str:
+        watch = engine.watches.get(a.watch_id)
+        if watch is not None:
+            return ws_mod.of_watch(watch)
+        return a.workspace or ws_mod.LEGACY
+
     @app.get("/api/approvals", tags=["approvals"], dependencies=auth)
-    async def list_approvals(include_decided: bool = Query(False)):
+    async def list_approvals(
+        include_decided: bool = Query(False),
+        workspace: str | None = Query(
+            None, description="Only approvals raised by this workspace's watches "
+            "(legacy = unclassified); blank = all",
+        ),
+    ):
+        ws = _ws_query(workspace, allow_legacy=True)
         items = (
             list(engine.approvals.values()) if include_decided else engine.pending_approvals()
         )
+        if ws is not None:
+            items = [a for a in items if _approval_scope(a) == ws]
         items.sort(key=lambda a: a.created_at, reverse=True)
-        return {"count": len(items), "approvals": [a.as_dict() for a in items]}
+        return {"count": len(items), "workspace": ws,
+                "approvals": [{**a.as_dict(), "workspace_effective": _approval_scope(a)}
+                              for a in items]}
 
     @app.post("/api/approvals/{approval_id}/approve", tags=["approvals"], dependencies=auth)
     async def approve(approval_id: str):
@@ -2058,8 +2390,20 @@ def create_app(
 
     # ------------------------------------------------------- trades/positions
     @app.get("/api/trades", tags=["reports"], dependencies=auth)
-    async def trades(limit: int = Query(200, ge=1, le=5000)):
-        rows = store.load_trades(limit)
+    async def trades(
+        limit: int = Query(200, ge=1, le=5000),
+        workspace: str | None = Query(
+            None, description="Only this workspace's journal (legacy = rows no workspace "
+            "owns); blank = every row, as before workspaces",
+        ),
+    ):
+        """Closed trades with realised P&L. Rows are returned exactly as stored, IDs and
+        P&L untouched; `workspace_effective` says which journal each one belongs to."""
+        ws = _ws_query(workspace, allow_legacy=True)
+        if ws is None:
+            rows = store.load_trades(limit)
+        else:
+            rows = [r for r in store.load_trades() if ws_mod.of_trade(r) == ws][-limit:]
         realised = sum(r.get("pnl", 0.0) for r in rows)
         wins = sum(1 for r in rows if r.get("pnl", 0.0) > 0)
         return {
@@ -2067,21 +2411,32 @@ def create_app(
             "realised_pnl": round(realised, 2),
             "wins": wins,
             "losses": len(rows) - wins,
-            "trades": rows,
+            "workspace": ws,
+            "trades": [{**r, "workspace_effective": ws_mod.of_trade(r),
+                        "workspace_assigned_by": "record" if r.get("workspace") else "legacy rule"}
+                       for r in rows],
         }
 
     @app.get("/api/positions", tags=["reports"], dependencies=auth)
-    async def positions():
-        watches = [w for w in engine.watches.values() if w.position is not None]
+    async def positions(
+        workspace: str | None = Query(
+            None, description="Only this workspace's open positions (legacy = "
+            "unclassified); blank = all. Broker positions are account-wide either way.",
+        ),
+    ):
+        ws = _ws_query(workspace, allow_legacy=True)
+        watches = [w for w in engine.watches.values()
+                   if w.position is not None and _watch_scope(w, ws)]
         prices = await engine._fetch_prices(watches) if watches else {}
         engine_side = [
             {
                 "watch_id": w.id,
                 **w.position.as_dict(prices.get(w.instrument.security_id)),
+                "workspace_effective": ws_mod.of_watch(w),
             }
             for w in watches
         ]
-        out = {"engine_positions": engine_side}
+        out = {"engine_positions": engine_side, "workspace": ws}
         try:
             out["broker_positions"] = [
                 {
@@ -2226,7 +2581,8 @@ def create_app(
         return source
 
     @app.get("/api/charts/sources", tags=["charts"], dependencies=auth)
-    async def chart_sources_list():
+    async def chart_sources_list(workspace: str | None = WS_QUERY):
+        strategy = cfg.strategy_for(_ws_query(workspace))
         return {
             "sources": data_source.available(),
             "timeframes": [t for t, _ in data_source.TIMEFRAMES],
@@ -2237,7 +2593,7 @@ def create_app(
                 {"id": "renko", "label": "Renko"},
             ],
             "active_data_source": getattr(engine.broker, "data_source", engine.broker.name),
-            "indicators": chart_indicators.catalog(cfg.strategy),
+            "indicators": chart_indicators.catalog(strategy),
             "default_indicators": chart_indicators.DEFAULT_IDS,
         }
 
@@ -2288,9 +2644,14 @@ def create_app(
         params: str | None = Query(
             None,
             description='Indicator parameters as JSON, e.g. {"zema_slow": {"period": 200}, '
-            '"st_tf2": {"tf": "1h", "period": 10, "factor": 3}}',
+            '"st_tf2": {"tf": "1h", "period": 10, "factor": 3}, '
+            '"vwap_bands": {"multiplier": 2.0}}',
         ),
+        workspace: str | None = WS_QUERY,
     ):
+        # The strategy indicators (VWAP, EMA, Supertrend, RSI, ADX) use the periods of
+        # the chart's workspace, the same ones its watches are evaluated with.
+        strategy = cfg.strategy_for(_ws_query(workspace))
         # Validated here rather than inside each provider, so a newly added source
         # cannot forget to do it.
         code = timeframes.normalise(timeframe)
@@ -2329,7 +2690,7 @@ def create_app(
 
         # Bars before the first one shown, so indicator lines start settled, Heikin
         # Ashi's recursion has run in, and Renko has history to build bricks from.
-        warm = chart_indicators.warmup_bars(cfg.strategy, wanted, ind_params) if wanted else 0
+        warm = chart_indicators.warmup_bars(strategy, wanted, ind_params) if wanted else 0
         if chart_type == "heikin_ashi":
             warm = max(warm, 50)
         fetch = bars + warm if chart_type != "renko" else max(2 * bars, bars + warm)
@@ -2375,7 +2736,7 @@ def create_app(
                     except BrokerError:
                         other[other_code] = []
             series = chart_indicators.compute(
-                base, cfg.strategy, wanted, params=ind_params, other=other,
+                base, strategy, wanted, params=ind_params, other=other,
                 minutes=minutes, segment=segment,
             )
 
@@ -2454,26 +2815,37 @@ def create_app(
             target_value=body.target_value,
             target_unit=body.target_unit,
             exit_mode=exit_mode,
-            product=body.product or cfg.engine.default_product,
+            product=body.product or cfg.defaults_for(body.workspace).get("product")
+            or cfg.engine.default_product,
             note=body.note.strip() or "manual order from the charts page",
         )
-        return await engine.place_ticket(
+        result = await engine.place_ticket(
             instrument=instrument,
             ticket=ticket,
             timeframe_minutes=timeframes.CODE_MINUTES[body.timeframe],
             kind="option" if instrument.is_option else "equity",
             chart_symbol=symbol,
+            workspace=body.workspace,
         )
+        watch = engine.watches.get((result.get("watch") or {}).get("id", ""))
+        if watch is not None:
+            result["watch"] = _owned_row(result["watch"], watch)
+        return result
 
     @app.get("/api/charts/trades", tags=["charts"], dependencies=auth)
-    async def chart_trades():
+    async def chart_trades(
+        workspace: str | None = Query(
+            None, description="Only this workspace's orders and positions; blank = all",
+        ),
+    ):
         """What to draw on the charts: pending GTTs, working entries, open positions.
 
         Makes no quote call - the charts already hold the latest price in their candles.
         """
+        ws = _ws_query(workspace, allow_legacy=True)
         rows = []
         for w in engine.watches.values():
-            if w.state not in CHART_TRADE_STATES:
+            if w.state not in CHART_TRADE_STATES or not _watch_scope(w, ws):
                 continue
             ids = {w.chart_symbol, data_source.chart_symbol_for(w.instrument)} - {""}
             rows.append({
@@ -2490,8 +2862,9 @@ def create_app(
                 "position": w.position.as_dict() if w.position else None,
                 "notes": w.notes,
                 "last_error": w.last_error,
+                "workspace_effective": ws_mod.of_watch(w),
             })
-        return {"mode": cfg.mode, "count": len(rows), "trades": rows}
+        return {"mode": cfg.mode, "count": len(rows), "trades": rows, "workspace": ws}
 
     @app.get("/api/combo", tags=["charts"], dependencies=auth)
     async def combo_chart(
@@ -2513,12 +2886,18 @@ def create_app(
         ema2: int = Query(21, ge=1, le=500),
         st_factor: float = Query(3.0, gt=0, le=50),
         st_atr: int = Query(10, ge=1, le=500),
+        vwap_mult: float = Query(
+            2.0, ge=0.1, le=10.0,
+            description="Advanced VWAP Bands: standard-deviation multiplier (chart only)",
+        ),
         spot: str | None = Query(
             None, description="Chart symbol for the underlying pane; default: the options' underlying"
         ),
+        workspace: str | None = WS_QUERY,
     ):
         """A basket as the TradingView combo script draws it: the underlying, the
-        combined premium with Advanced VWAP / EMA / Supertrend, the call legs and the put legs.
+        combined premium with session VWAP (and Advanced VWAP Bands) / EMA / Supertrend,
+        the call legs and the put legs.
 
         Legs are weighted by lots, reduced by their common divisor, so the charts read in
         premium points. See combo.py for the arithmetic and its bar-range modes.
@@ -2632,14 +3011,16 @@ def create_app(
             spot_bars = await src.candles(spot_symbol, timeframe, bars)
             spot_payload["bars"] = [b.as_dict() for b in spot_bars]
             spot_payload["indicators"] = chart_indicators.compute(
-                spot_bars, cfg.strategy, ["vwap", "ema_price", "supertrend"]
+                spot_bars, cfg.strategy_for(_ws_query(workspace)),
+                ["vwap", "vwap_bands", "ema_price", "supertrend"],
+                params={"vwap_bands": {"multiplier": vwap_mult}},
             )
         except BrokerError as exc:
             spot_payload["error"] = str(exc)
 
         payload = build_combo(
             combo_legs, leg_bars, mode=bar_range, absolute=cp == "abs",
-            ema1=ema1, ema2=ema2, st_factor=st_factor, st_atr=st_atr,
+            ema1=ema1, ema2=ema2, st_factor=st_factor, st_atr=st_atr, vwap_mult=vwap_mult,
         )
         return {
             "name": name,
@@ -2651,7 +3032,8 @@ def create_app(
             "spot": spot_payload,
             "legs_with_data": sum(1 for rows in leg_bars if rows),
             "errors": [f"{leg.label}: {leg.error}" for leg in combo_legs if leg.error],
-            "settings": {"ema1": ema1, "ema2": ema2, "st_factor": st_factor, "st_atr": st_atr},
+            "settings": {"ema1": ema1, "ema2": ema2, "st_factor": st_factor, "st_atr": st_atr,
+                         "vwap_mult": vwap_mult},
             "mode": cfg.mode,
             **payload,
         }
@@ -2663,20 +3045,59 @@ def create_app(
     else:  # pragma: no cover - only if the vendored asset is missing
         log.warning("static assets missing at %s; charts will not render", static_dir)
 
+    # The spiritual entrance; no trading data and no API calls on this page.
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def dashboard():
-        return HTMLResponse(DASHBOARD_HTML)
+    async def landing():
+        return HTMLResponse(landing_html())
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        return FileResponse(static_dir / "favicon.svg", media_type="image/svg+xml")
+
+    # The application shell. Every dashboard view is the same document; the URL picks
+    # the workspace and child view, so refresh, Back / Forward and shared links work.
+    @app.get("/app", response_class=HTMLResponse, include_in_schema=False)
+    async def app_root():
+        return HTMLResponse(shell_html(DASHBOARD_HTML))
+
+    @app.get("/app/system", response_class=HTMLResponse, include_in_schema=False)
+    async def app_system():
+        return HTMLResponse(shell_html(DASHBOARD_HTML, system=True))
+
+    @app.get("/app/{slug}", response_class=HTMLResponse, include_in_schema=False)
+    async def app_workspace(slug: str):
+        ws = ws_mod.BY_SLUG.get(slug)
+        if ws is None:
+            return HTMLResponse(NOT_FOUND_HTML, status_code=404)
+        return HTMLResponse(shell_html(DASHBOARD_HTML, ws))
+
+    @app.get("/app/{slug}/{view}", response_class=HTMLResponse, include_in_schema=False)
+    async def app_view(slug: str, view: str):
+        ws = ws_mod.BY_SLUG.get(slug)
+        if ws is None or view not in ws_mod.view_ids(ws):
+            return HTMLResponse(NOT_FOUND_HTML, status_code=404)
+        page = ws_mod.PAGE_VIEWS.get(view)
+        if page == "charts":
+            return HTMLResponse(page_in_shell(CHARTS_HTML, ws, view))
+        if page == "chain":
+            return HTMLResponse(page_in_shell(CHAIN_HTML, ws, view))
+        if page == "combo":
+            return HTMLResponse(page_in_shell(COMBO_HTML, ws, view))
+        return HTMLResponse(shell_html(DASHBOARD_HTML, ws, view))
+
+    # The original full-page routes keep working for bookmarks and old links. They
+    # carry the shell's navigation too, with no workspace selected, and keep their
+    # original browser storage.
     @app.get("/charts", response_class=HTMLResponse, include_in_schema=False)
     async def charts():
-        return HTMLResponse(CHARTS_HTML)
+        return HTMLResponse(page_in_shell(CHARTS_HTML, None, "chart"))
 
     @app.get("/chain", response_class=HTMLResponse, include_in_schema=False)
     async def chain_page():
-        return HTMLResponse(CHAIN_HTML)
+        return HTMLResponse(page_in_shell(CHAIN_HTML, None, "option-chain"))
 
     @app.get("/combo", response_class=HTMLResponse, include_in_schema=False)
     async def combo_page():
-        return HTMLResponse(COMBO_HTML)
+        return HTMLResponse(page_in_shell(COMBO_HTML, None, "combo-chart"))
 
     return app

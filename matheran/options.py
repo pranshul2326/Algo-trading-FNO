@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from typing import Iterable
 
@@ -21,7 +21,7 @@ from .candles import (
 from .config import StrategyConfig
 from .models import Instrument, OiStats, OptionRow, Snapshot
 from .strategy import Indicators, evaluate_entry
-from .timeframes import load_series
+from .timeframes import code_of, load_series
 from .timeutil import IST, now_ist, session_close
 
 log = logging.getLogger(__name__)
@@ -229,6 +229,63 @@ async def select_chain(
     )
 
 
+# ------------------------------------------------------------ scan conditions
+# The Option Scan's conditions: which checks a row needs for READY (every ticked one
+# must hold: AND) and the timeframe each one reads. The indicator periods come in
+# with the strategy settings passed to scan_chain. The default is the entry gate the
+# engine uses, exactly: VWAP, RSI vs EMA(RSI), Supertrend and ADX ticked on the scan
+# timeframe, and EMA shown but not required.
+SCAN_CONDITIONS: tuple[tuple[str, str], ...] = (
+    ("vwap", "Price above VWAP (session)"),
+    ("rsi", "RSI above EMA(RSI)"),
+    ("ema", "Price above EMA"),
+    ("supertrend", "Price above Supertrend"),
+    ("adx", "ADX above the minimum"),
+)
+SCAN_CONDITION_IDS: tuple[str, ...] = tuple(cid for cid, _ in SCAN_CONDITIONS)
+SCAN_DEFAULT_ON = {"vwap": True, "rsi": True, "ema": False, "supertrend": True, "adx": True}
+# The evaluate_entry check each condition is (the long side: the scan buys options).
+_SCAN_CHECK = {
+    "vwap": "price_above_vwap",
+    "rsi": "rsi_above_signal",
+    "supertrend": "price_above_supertrend",
+    "adx": "adx_above_min",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ScanCondition:
+    id: str                  # one of SCAN_CONDITION_IDS
+    on: bool                 # required for READY
+    timeframe_minutes: int   # the candles it reads
+
+
+def default_scan_conditions(timeframe_minutes: int) -> list[ScanCondition]:
+    """The engine's entry gate, every condition on the scan timeframe."""
+    return [ScanCondition(cid, SCAN_DEFAULT_ON[cid], int(timeframe_minutes))
+            for cid in SCAN_CONDITION_IDS]
+
+
+def _condition_result(
+    cond: ScanCondition, signal, cfg: StrategyConfig, tag: str
+) -> tuple[bool, str]:
+    """(met, why not) for one condition, from that timeframe's entry evaluation."""
+    if signal.checks.get("enough_history") is False:
+        return False, tag + signal.why.get("enough_history", "not enough closed candles yet")
+    if cond.id == "ema":
+        # Same price as the other checks: the live price, else the last close.
+        ema_v, price = signal.snapshot.price_ema, signal.snapshot.ltp
+        if ema_v is None or price is None:
+            return False, tag + "EMA not available yet"
+        if price > ema_v:
+            return True, ""
+        return False, tag + f"price {price:.2f} not above EMA({cfg.price_ema_period}) {ema_v:.2f}"
+    key = _SCAN_CHECK[cond.id]
+    if signal.checks.get(key):
+        return True, ""
+    return False, tag + signal.why.get(key, key.replace("_", " "))
+
+
 async def scan_chain(
     broker: Broker,
     selection: ChainSelection,
@@ -238,11 +295,23 @@ async def scan_chain(
     adx_min: float | None = None,
     candle_type: str = "normal",
     day: date | None = None,
+    conditions: list[ScanCondition] | None = None,
 ) -> list[OptionRow]:
-    """Build the display table and evaluate the entry gate for every leg."""
+    """Build the display table and evaluate the entry gate for every leg.
+
+    `conditions` choose which checks make a row READY (all ticked ones) and the
+    timeframe each reads; the default is the engine's own gate on `timeframe_minutes`,
+    whose rows, readiness and reasons are exactly what this function always returned.
+    Every value comes from the same Indicators and evaluate_entry the engine runs.
+    """
     candle_type = normalize_candle_type(candle_type)
     day = day or now_ist().date()
     instruments = [inst for inst, _ in selection.instruments]
+    primary = int(timeframe_minutes)
+    conds = list(conditions) if conditions else default_scan_conditions(primary)
+    is_default = conds == default_scan_conditions(primary)
+    frames = [primary] + sorted({c.timeframe_minutes for c in conds} - {primary})
+    tf_of = {c.id: c.timeframe_minutes for c in conds}
 
     try:
         prices = await broker.ltp(instruments)
@@ -252,18 +321,19 @@ async def scan_chain(
 
     sem = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
 
+    async def series_for(inst: Instrument, raw, minutes: int):
+        if minutes >= 60:
+            # An hour and up reaches back past the 1-minute feed's six sessions.
+            return await load_series(
+                broker, inst, minutes, bars=max(150, 3 * cfg.warmup_bars()),
+            )
+        return resample(raw, minutes, inst.segment)
+
     async def one(inst: Instrument, label: str) -> OptionRow:
         async with sem:
             try:
                 raw = await broker.intraday_candles(inst, day, 1)
-                if timeframe_minutes >= 60:
-                    # An hour and up reaches back past the 1-minute feed's six sessions.
-                    series = await load_series(
-                        broker, inst, timeframe_minutes,
-                        bars=max(150, 3 * cfg.warmup_bars()),
-                    )
-                else:
-                    series = resample(raw, timeframe_minutes, inst.segment)
+                series = {tf: await series_for(inst, raw, tf) for tf in frames}
             except BrokerError as exc:
                 return OptionRow(
                     instrument=inst,
@@ -277,21 +347,52 @@ async def scan_chain(
                     error=str(exc),
                 )
 
-        closed, _forming = drop_forming(series, timeframe_minutes, now_ist(), inst.segment)
-        ind = Indicators(apply_candle_type(closed, candle_type), cfg)
+        closed, _forming = drop_forming(series[primary], primary, now_ist(), inst.segment)
         ltp = prices.get(inst.security_id)
         if ltp is None and closed:
             ltp = float(closed.close[-1])
         oi = oi_stats(raw)
 
-        signal = evaluate_entry(
-            ind,
-            cfg,
-            ltp=ltp,
-            require_adx=True,
-            adx_min=adx_min if adx_min is not None else cfg.adx_min,
-        )
-        snap = signal.snapshot
+        threshold = adx_min if adx_min is not None else cfg.adx_min
+        signals = {}
+        for tf in frames:
+            tf_closed = closed if tf == primary else drop_forming(
+                series[tf], tf, now_ist(), inst.segment)[0]
+            ind = Indicators(apply_candle_type(tf_closed, candle_type), cfg)
+            signals[tf] = evaluate_entry(ind, cfg, ltp=ltp, require_adx=True, adx_min=threshold)
+        signal = signals[primary]
+
+        results = []
+        for cond in conds:
+            tag = "" if cond.timeframe_minutes == primary else f"[{code_of(cond.timeframe_minutes)}] "
+            met, why = _condition_result(cond, signals[cond.timeframe_minutes], cfg, tag)
+            results.append({"id": cond.id, "on": cond.on,
+                            "timeframe": code_of(cond.timeframe_minutes),
+                            "met": met, "reason": why})
+
+        if is_default:
+            snap, ready, reasons = signal.snapshot, signal.ready, signal.reasons
+        else:
+            # Each column shows its own condition's timeframe.
+            def at(cid: str) -> Snapshot:
+                return signals[tf_of[cid]].snapshot
+
+            snap = replace(
+                signal.snapshot,
+                vwap=at("vwap").vwap,
+                rsi=at("rsi").rsi,
+                rsi_signal_entry=at("rsi").rsi_signal_entry,
+                rsi_signal_exit=at("rsi").rsi_signal_exit,
+                price_ema=at("ema").price_ema,
+                supertrend=at("supertrend").supertrend,
+                supertrend_direction=at("supertrend").supertrend_direction,
+                adx=at("adx").adx,
+            )
+            required = [r for r in results if r["on"]]
+            ready = bool(required) and all(r["met"] for r in required)
+            reasons = [r["reason"] for r in required if not r["met"]]
+            if ready:
+                reasons.append("all ticked conditions satisfied")
         above_vwap = bool(
             snap.vwap is not None and ltp is not None and ltp > snap.vwap
         )
@@ -300,10 +401,11 @@ async def scan_chain(
             moneyness=label,
             snapshot=snap,
             price_above_vwap=above_vwap,
-            entry_ready=signal.ready,
+            entry_ready=ready,
             checks=signal.checks,
-            reasons=signal.reasons,
+            reasons=reasons,
             oi=oi,
+            conditions=results,
         )
 
     rows = await asyncio.gather(*(one(inst, label) for inst, label in selection.instruments))
@@ -563,7 +665,7 @@ async def straddle_table(
 ) -> dict:
     """ATM +/- seven paired CE+PE premiums with change and combo indicators.
 
-    Change is measured against the previous session's final CE+PE closes. Advanced VWAP,
+    Change is measured against the previous session's final CE+PE closes. Session VWAP,
     EMA and Supertrend are calculated on closed combined-premium candles; their
     relation is evaluated against the current CE+PE quote. Candle closes are never
     live quotes. Live-capable execution requires fresh positive broker quotes for both
@@ -914,7 +1016,7 @@ async def straddle_table(
             )
         missing_indicators = [
             name for name, value in (
-                ("Advanced VWAP", vwap),
+                ("VWAP", vwap),
                 ("Supertrend", supertrend_value),
                 ("EMA(21)", ema_21),
             ) if value is None

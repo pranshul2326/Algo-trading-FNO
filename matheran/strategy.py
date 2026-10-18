@@ -1,7 +1,7 @@
 """Entry and exit rules.
 
 Entry (long only), evaluated on the last CLOSED candle of the chosen timeframe:
-  0. LTP > session Advanced VWAP
+  0. LTP > session VWAP
   1. RSI(21) above EMA(RSI(21), 21)
   2. price above Supertrend(21, 0.618)
   3. options only: ADX(14) > 20
@@ -116,7 +116,7 @@ def evaluate_entry(
 ) -> SignalResult:
     """Entry gate for either direction.
 
-    A short is the exact mirror of a long: price below Advanced VWAP instead of above, RSI
+    A short is the exact mirror of a long: price below session VWAP instead of above, RSI
     below its signal line, price below Supertrend. ADX is directionless, so that
     check is unchanged. Every sub-condition is reported so the approval card can show
     exactly why the engine wants in.
@@ -124,15 +124,22 @@ def evaluate_entry(
     snap = ind.snapshot(ltp)
     checks: dict[str, bool] = {}
     reasons: list[str] = []
+    why: dict[str, str] = {}      # the same reasons, by the check they explain
     short = direction is Direction.SHORT
+
+    def fail(check: str, text: str) -> None:
+        reasons.append(text)
+        why[check] = text
 
     warmup = cfg.warmup_bars()
     if ind.n < warmup:
+        text = f"need {warmup} closed candles, have {ind.n}"
         return SignalResult(
             ready=False,
             checks={"enough_history": False},
-            reasons=[f"need {warmup} closed candles, have {ind.n}"],
+            reasons=[text],
             snapshot=snap,
+            why={"enough_history": text},
         )
 
     i = ind.n - 1
@@ -140,14 +147,15 @@ def evaluate_entry(
 
     side_word = "below" if short else "above"
 
-    # 0. current price on the right side of session Advanced VWAP
+    # 0. current price on the right side of the session VWAP (the centerline, never a band)
     vwap = snap.vwap
     ok_vwap = vwap is not None and (price < vwap if short else price > vwap)
     checks[f"price_{side_word}_vwap"] = ok_vwap
     if not ok_vwap:
-        reasons.append(
-            f"price {price:.2f} is not {side_word} Advanced VWAP {vwap:.2f}" if vwap is not None
-            else "Advanced VWAP unavailable"
+        fail(
+            f"price_{side_word}_vwap",
+            f"price {price:.2f} is not {side_word} VWAP {vwap:.2f}" if vwap is not None
+            else "VWAP unavailable",
         )
 
     # 1. RSI on the right side of its 21-EMA signal line
@@ -169,11 +177,12 @@ def evaluate_entry(
     checks[f"rsi_{side_word}_signal"] = ok_rsi
     if not ok_rsi:
         if rsi_v is None or sig_v is None:
-            reasons.append("RSI or its signal line is not available yet")
+            fail(f"rsi_{side_word}_signal", "RSI or its signal line is not available yet")
         else:
-            reasons.append(
+            fail(
+                f"rsi_{side_word}_signal",
                 f"RSI({cfg.rsi_period}) {rsi_v:.2f} not {label} "
-                f"EMA(RSI,{cfg.rsi_signal_entry_period}) {sig_v:.2f}"
+                f"EMA(RSI,{cfg.rsi_signal_entry_period}) {sig_v:.2f}",
             )
 
     # 2. price on the right side of supertrend (+1 = downtrend, -1 = uptrend)
@@ -193,11 +202,12 @@ def evaluate_entry(
     checks[f"price_{side_word}_supertrend"] = bool(ok_st)
     if not ok_st:
         if st_v is None:
-            reasons.append("Supertrend not available yet")
+            fail(f"price_{side_word}_supertrend", "Supertrend not available yet")
         else:
-            reasons.append(
+            fail(
+                f"price_{side_word}_supertrend",
                 f"price {float(ind.series.close[i]):.2f} not {side_word} "
-                f"Supertrend({cfg.supertrend_period},{cfg.supertrend_factor}) {st_v:.2f}"
+                f"Supertrend({cfg.supertrend_period},{cfg.supertrend_factor}) {st_v:.2f}",
             )
 
     # 3. ADX filter (options strategy)
@@ -210,16 +220,17 @@ def evaluate_entry(
             ok_adx = adx_v is not None and adx_v > threshold
             checks["adx_above_min"] = ok_adx
             if not ok_adx:
-                reasons.append(
+                fail(
+                    "adx_above_min",
                     f"ADX({cfg.adx_period}) {adx_v:.2f} not above {threshold:.2f}"
                     if adx_v is not None
-                    else "ADX not available yet"
+                    else "ADX not available yet",
                 )
 
     ready = all(checks.values())
     if ready:
         reasons.append("all entry conditions satisfied")
-    return SignalResult(ready=ready, checks=checks, reasons=reasons, snapshot=snap)
+    return SignalResult(ready=ready, checks=checks, reasons=reasons, snapshot=snap, why=why)
 
 
 def exit_outcome(

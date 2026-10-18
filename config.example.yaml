@@ -1,4 +1,4 @@
-# Matheran trading engine config. Copy to config.yaml and edit.
+# Saidarshan trading engine config. Copy to config.yaml and edit.
 # Secrets do NOT live here - they come from .env / environment variables.
 
 server:
@@ -52,6 +52,9 @@ strategy:
   entry_condition_mode: state
   entry_candle_type: normal   # normal | heikin_ashi; fixed Strategy/Trade BUY/SELL entry gate
   exit_condition_mode: state   # only read while exit_rules is null
+  # The candles the exit_rules rows read. Leave it out (or null) for each watch's own
+  # timeframe_minutes, as before; orders placed from a chart keep the chart's.
+  # exit_timeframe_minutes: 15
 
   # Exit conditions, one row each, as built on the Strategy tab. Rows are joined by
   # AND / OR (AND binds tighter, as in Pine). `on: close` checks the last closed
@@ -95,7 +98,23 @@ options:
   otm_count: 5             # ATM plus 5 OTM strikes each side
   default_underlying: NIFTY
   expiry: nearest          # nearest | YYYY-MM-DD
-# Live BUY/SELL scanner (Scanner tab, run.py scan). Read-only: it never places orders.
+
+# Per-workspace settings, written by each workspace's Setup and Strategy views.
+# Ids: stock_intraday, option_buyer, option_seller. A workspace with no entry follows
+# the strategy: and risk: sections above as its own deep copy, so a change in one
+# workspace never reaches another. A saved part is the section above with the given
+# keys changed; leave a part out to keep following it. Mode, brokers, credentials,
+# Halt / Resume, the engine caps and the session times apply to all workspaces and
+# cannot be set here.
+# workspaces:
+#   option_buyer:
+#     strategy: {timeframe_minutes: 3, require_adx: true}
+#     risk: {stop_loss_pct: 20.0, target_pct: 40.0}
+#     defaults: {underlying: BANKNIFTY, lots: 1}
+#   option_seller:
+#     defaults: {underlying: NIFTY, lots: 1, stop_loss_pct: 30.0}
+
+# Live BUY/SELL scanner (Stock Intraday > Scanner, run.py scan). Read-only: it never places orders.
 # Each row is one condition on its own timeframe, written like the exit rules above, plus
 #   tf: 1m 3m 5m 9m 15m 30m 1h 2h 1D 1W 1M
 #   candle_type: normal | heikin_ashi (default: normal)
@@ -123,6 +142,6 @@ scanner:
                              # after you press Run, never on page load, and is refused when it would
                              # exceed the budget. run.py scan ignores it.
   max_requests_per_30min: 1500   # the scanner's share of Upstox's 2,000 requests per 30 minutes,
-                                 # counted across Matheran processes sharing this cache directory
+                                 # counted across Saidarshan processes sharing this cache directory
   requests_per_second: 6         # 0.5-8; the engine keeps the rest of Upstox's 10/s
   concurrency: 6

@@ -1,8 +1,13 @@
-# Matheran
+# Saidarshan
 
-Approval-gated intraday trading engine for NSE/BSE equity and index options, with a
-browser console for everything: credentials, strategy tuning, the options scan table,
-approvals, and the trade journal.
+Approval-gated intraday trading engine for NSE/BSE equity and index options. The base URL
+opens the **Sai Baba Live Darshan Portal**, a calm landing page with no trading data on it;
+**Enter Saidarshan** opens the console at `/app`, organised in three independent
+workspaces (Stock Intraday, Option Buyer, Option Seller) for credentials, strategy tuning,
+the scans, approvals and the trade journal.
+
+The Python package is still `matheran/`, and `MATHERAN_API_KEY`, the deployment paths and
+the browser-storage keys keep their names, so existing setups and imports keep working.
 
 The engine never opens a position on its own. It watches, and when every condition
 lines up it raises an approval card. You press **Approve & buy**. After the exit it
@@ -19,11 +24,12 @@ cp config.example.yaml config.yaml          # optional; sane defaults apply eith
 .venv/bin/python run.py serve
 ```
 
-Open <http://127.0.0.1:8787>.
+Open <http://127.0.0.1:8787> for the portal, or <http://127.0.0.1:8787/app> for the console.
 
-1. **Setup** tab → *Generate console API key*. It is written to `.env` (mode `0600`) and
-   applied immediately; the browser tab keeps it for you.
-2. Fill in your broker credentials in the same tab, press **Save credentials**, then
+1. **System** (top right of the console, `/app/system`) → *Generate dashboard password*.
+   It is the `MATHERAN_API_KEY`, written to `.env` (mode `0600`) and applied immediately;
+   the browser tab keeps it for you.
+2. Fill in your broker credentials on the same page, press **Save credentials**, then
    **Test connection**, then **Apply to engine**.
 3. Leave mode on **paper** until you trust it. Paper uses real market data and simulates
    fills; nothing reaches the exchange.
@@ -39,7 +45,7 @@ click through the whole UI before connecting an account. Everything is labelled
 .venv/bin/python run.py doctor                       # config + broker connectivity
 .venv/bin/python run.py chain --underlying NIFTY     # print the scan table
 .venv/bin/python run.py scan --universe nifty50   # live BUY/SELL scanner
-.venv/bin/python run.py serve --port 8787            # API + console
+.venv/bin/python run.py serve --port 8787            # API + portal (/) + console (/app)
 ```
 
 ---
@@ -55,13 +61,13 @@ timeframe, so a condition cannot appear and vanish inside the same bar.
 
 | # | Long (BUY) | Short (SELL) |
 |---|---|---|
-| 0 | Current price above Advanced VWAP (session) | below Advanced VWAP (session) |
+| 0 | Current price above VWAP (session) | below VWAP (session) |
 | 1 | RSI(21) above EMA(RSI(21), 21) | RSI(21) below it |
 | 2 | Price above Supertrend(21, 0.618) | price below it |
 | 3 | ADX(14) above 20 — options only by default | same (ADX has no direction) |
 
 A BOTH watch checks both columns. They cannot both hold at once, because price cannot be
-above and below Advanced VWAP together, so at most one approval is ever raised. The approval card
+above and below the session VWAP together, so at most one approval is ever raised. The approval card
 says BUY or SELL in so many words.
 
 **Exit** — whichever comes first:
@@ -69,8 +75,8 @@ says BUY or SELL in so many words.
 | Trigger | Long | Short | Checked on |
 |---|---|---|---|
 | Exit conditions (below) | as written | the mirror image | per row: candle close or live price |
-| Stop loss: 3% of capital deployed | 3% below entry | 3% above entry | live price, between candles |
-| Target %, if you set one | above entry | below entry | live price, between candles |
+| Stop loss: 3% of capital deployed, or a price you give | 3% below entry | 3% above entry | live price, between candles |
+| Target % or price, if you set one | above entry | below entry | live price, between candles |
 | Trailing profit, if you set one | stop follows the best price once in profit | mirror image | live price, between candles |
 | Square-off at 15:15 IST (intraday only) | | | clock |
 
@@ -97,6 +103,22 @@ watches, the options scan, the Strategy tab and every chart. Intraday bars are a
 remainder); a day bar is one session, a week Monday to Friday, a month the calendar month.
 From an hour up, earlier sessions come from the data provider's history service.
 
+**Entry and exit timeframes.** The Strategy view's *Entry timeframe* is the candles the
+entry conditions read; it is the default for new watches, and each watch keeps the one it
+was added with. *Exit timeframe* is the candles the exit condition rows read: *Same as
+entry* (the default, each watch's own timeframe, as before) or any timeframe above. It
+applies to every watch of the workspace and to their open positions from the next check,
+like the rows themselves. An order placed from a chart keeps the chart's timeframe. In
+`config.yaml` it is `strategy.exit_timeframe_minutes` (or under `workspaces.<id>`), left out
+while unset.
+
+**Stop and target as % or price.** A stock watch takes its stop and its target either as a
+% of the entry or as a price (LONG and SHORT watches; a BOTH watch uses %). A price is used
+as it is: a signal at a price already past the watch's own stop or target raises no approval,
+and the watch's note says why. The Buy / Sell dialog on the Trade and Option Scan views
+prefills the watch's stop and target and lets this order set its own, % or price, checked
+against the entry before anything is sent.
+
 ### Exit conditions
 
 The Strategy tab builds the indicator exits as rows, one condition per row: an
@@ -106,12 +128,12 @@ joined with AND / OR; AND binds tighter than OR, as in Pine Script, so
 `A AND B OR C` means `(A AND B) OR C`. The tab reads the rows back in words for both
 directions before you save.
 
-Indicators: Close, Open, High, Low, Advanced VWAP, EMA, SMA, Supertrend, RSI, EMA of RSI, ADX,
-+DI, −DI, ATR, or a plain number.
+Indicators: Close, Open, High, Low, VWAP (session), EMA, SMA, Supertrend, RSI, EMA of RSI, ADX,
++DI, −DI, ATR, or a plain number. The VWAP bands are chart-only; no condition reads them.
 
 Each row is checked either
 
-- **on candle close** — on the last closed candle of the watch's timeframe, and only on
+- **on candle close** — on the last closed candle of the exit timeframe, and only on
   candles that closed *after* the position was opened, so a condition that already held
   when you bought cannot sell you straight back out; or
 - **live price** — on the candle still forming, its close taken from the live price, so
@@ -165,32 +187,116 @@ Written to match TradingView (Pine v5), because that is probably what you are ey
 - `ta.atr` uses RMA, and true range on the first bar is `high − low`
 - Supertrend follows Pine's band-locking and direction-flip logic exactly; `direction == -1`
   (uptrend) is the same test as "price above supertrend"
-- Advanced VWAP uses the typical price `(H+L+C)/3`, cumulative, reset every session
+- VWAP (session) uses the typical price `(H+L+C)/3`, cumulative, reset every session. A
+  session with no volume at all (an index) uses the running mean of the typical price, and
+  an isolated zero-volume bar carries the cumulative values forward
 - Feeding RSI into an EMA skips the NaN prefix, as Pine does with `na` series
 
 `run.py selfcheck` proves each of these against an independently written reference
 implementation plus invariants, along with the day, week and month bars, the zero-lag EMA,
-Heikin Ashi and Renko. 80 checks.
+Heikin Ashi, Renko, the VWAP bands, the Supertrend chart payload and the workspace rules.
+105 checks.
+
+### Advanced VWAP Bands
+
+A chart overlay around the same session VWAP, never read by a signal, order, watch or
+scan. Per session, from the typical price `TP = (H+L+C)/3`:
+
+```
+VWAP     = Σ(V × TP) / ΣV                       (session_vwap(), unchanged)
+variance = max(Σ(V × TP²) / ΣV − VWAP², 0)      volume-weighted population variance
+sigma    = √variance
+upper    = VWAP + multiplier × sigma            multiplier 2.0 by default, 0.1 to 10, step 0.1
+lower    = VWAP − multiplier × sigma
+```
+
+The sums are taken about the session's first contributing typical price. A shift does not
+change a variance, so the result is the formula above, without the loss of precision
+`Σ(V × TP²)` would suffer at index-sized prices.
+Zero volume: the bands are blank until a session's first traded bar; an isolated
+zero-volume bar carries the weighted sums forward rather than resetting or adding volume;
+a session with no volume at all uses the unweighted running population standard deviation
+of the typical price, matching the VWAP's running-mean fallback. Both reset at every
+session boundary. The code is `session_vwap_sigma()` and `session_vwap_bands()` in
+`matheran/indicators.py`.
 
 ---
 
-## The console
+## The portal and the console
 
-| Tab | What you do there |
+| Address | What it is |
 |---|---|
-| **Setup** | Credentials, broker choice, paper/live, connection test, apply to engine |
-| **Trade** | Add stock watches (LONG / SHORT / BOTH, intraday or delivery, an exit mode), approve or reject signals, see live indicator values and a **Ready** column (every entry condition met, each one in the tooltip), manual Buy / Sell at market or limit, exit positions |
-| **Options** | ATM + N OTM scan table, one-click watch on any contract, Buy at market or limit |
-| **Baskets** | Build buy + sell combinations, execute them at market or as limit orders, exit them as one, live P&L per leg, chart the combined premium |
-| **Strategy** | Every strategy, risk and session parameter: exit mode, default product, trailing profit, and the exit conditions row by row, saved to `config.yaml` |
-| **Journal** | Trade log with direction, realised P&L and what exactly closed each trade, and open positions |
-| **Charts ↗** | `/charts` — multi-pane live candlestick grid, with a Trade button on every pane |
-| **Option chain ↗** | `/chain` — calls, strikes and puts on one page, with OI, OI change and 5-minute buildup |
-| **Basket combo ↗** | `/combo` — a basket's underlying, combined premium, calls and puts on one 2 × 2 screen |
+| `/` | The Sai Baba Live Darshan Portal: brand, heading, the devotional lines and **Enter Saidarshan**. No trading data. Old bookmarks such as `/#trade` or `/#options` forward to the view that replaced them (`/#setup` opens System) |
+| `/app` | The console. Opens the workspace and view you used last, else Stock Intraday → Setup |
+| `/app/<workspace>/<view>` | One view, e.g. `/app/stock-intraday/scanner`, `/app/option-buyer/option-scan`, `/app/option-seller/combo-chart?basket=<id>`. Refresh, Back/Forward and Cmd/Ctrl-click all work |
+| `/app/system` | System settings, which apply to all workspaces |
+| `/charts`, `/chain`, `/combo` | The old full-page addresses, still working with their query strings, shown inside the app shell |
 
-The header always shows mode (with a loud red pill in live), broker and data source,
-whether the market is open, whether a key is required, and a **Halt** button.
-Halt stops new signals and optionally squares off everything.
+The console has three workspaces, each with its own child views in this order:
+
+| Workspace | Views |
+|---|---|
+| **Stock Intraday** | Setup · Scanner · Strategy · Trade · Journal · Chart |
+| **Option Buyer** | Setup · Option Scan · Strategy · Trade · Journal · Chart |
+| **Option Seller** | Setup · Straddle Scan · Option Chain · Basket · Strategy · Chart · Combo Chart · Journal |
+
+| View | What you do there |
+|---|---|
+| **Setup** | This workspace's defaults: exchange, shares and direction for Stock Intraday; underlying, OTM strikes, timeframe, candle type, ATM reference, ADX minimum and lots for Option Buyer; underlying, timeframe, candle type, lots per leg, chain strikes, buildup window and per-leg stop / target for Option Seller; product and exit mode for all three. The global settings are shown read-only |
+| **Scanner** | The live BUY/SELL stock scanner (below) |
+| **Option Scan** | The ATM + N OTM scan table with the conditions READY needs (tick, timeframe and periods per condition), one-click watch on any contract, Buy at market or limit with its own stop and target |
+| **Straddle Scan** | The straddle monitor |
+| **Trade** | Watches (LONG / SHORT / BOTH, intraday or delivery, an exit mode, a stop and target as % or price), approvals, live indicator values and a **Ready** column (every entry condition met, each one in the tooltip), manual Buy / Sell at market or limit with this order's own stop and target, exit positions. Only this workspace's records |
+| **Basket** | Build buy + sell combinations, execute them at market or as limit orders, exit them as one, live P&L per leg, chart the combined premium |
+| **Strategy** | This workspace's strategy and risk parameters: entry and exit timeframes, exit mode, default product, trailing profit, and the exit conditions row by row, saved to `config.yaml` |
+| **Journal** | This workspace's trade log with direction, realised P&L and what exactly closed each trade, and its open positions |
+| **Chart** | The multi-pane live candlestick grid (`/charts`), with a Trade button on every pane |
+| **Option Chain** | Calls, strikes and puts on one page (`/chain`), with OI, OI change and 5-minute buildup |
+| **Combo Chart** | A basket's underlying, combined premium, calls and puts on one 2 × 2 screen (`/combo`) |
+
+**System** (`/app/system`, linked top right) holds what there is only one of: mode,
+brokers, credentials, the dashboard password, the engine's caps and session times, and
+records no workspace owns. The header always shows mode (with a loud red pill in live),
+broker and data source, whether the market is open, whether a key is required, and a
+**Halt** button. Halt stops new signals and optionally squares off everything, in every
+workspace.
+
+### Workspaces
+
+A workspace scopes what you see and edit; it does not scope the machinery. There is one
+engine, one broker, one indicator library and one set of safety controls, shared by all
+three, so the same candles give the same values everywhere.
+
+- **Settings.** Each workspace has its own strategy, risk and setup defaults, saved under
+  `workspaces.<id>` in `config.yaml` (`stock_intraday`, `option_buyer`,
+  `option_seller`). A workspace you have never saved follows the top-level `strategy:`
+  and `risk:` sections, as a deep copy, so editing one workspace never changes another.
+  **Use global strategy** and **Use global defaults** go back to following them. Mode,
+  brokers, credentials, Halt / Resume, the position and per-day caps, market hours and
+  session times stay global.
+- **Records.** New watches, approvals, orders, journal rows and baskets carry a
+  `workspace` field, and Trade and Journal list only their own. Records from before
+  workspaces have none and are placed by one rule that reads only the record: a basket or
+  basket leg → Option Seller, a cash equity → Stock Intraday, a bought option → Option
+  Buyer, a sold option → Option Seller. Anything else (a future, a two-way option watch)
+  stays **Unclassified** and is listed on the System page only, never in two journals.
+  Nothing on disk is rewritten; ids and P&L are unchanged.
+- **API.** List endpoints take `?workspace=` (an id or a URL slug; `legacy` for the
+  unclassified records). Without it they return everything, as before. A create call
+  without `workspace` gets the rule above. Approving or buying through another
+  workspace's watch, or executing another workspace's basket, returns 409 and sends
+  nothing. `GET /api/workspaces` describes the three; `PUT /api/settings/workspaces/{id}`
+  saves one and `POST /api/settings/workspaces/{id}/reset` stops saving parts of it.
+  Like every config write they are accepted from this machine only, and they sit under
+  `/api/settings/`, which the Lightsail proxy already refuses.
+- **Browser state.** Chart layouts, drawings, indicator settings, the option-chain and
+  combo preferences and the form drafts are stored per workspace under
+  `saidarshan.ws.<id>.<key>`. On first use each is copied once from its old key
+  (`matheranCharts.v1`, `matheranChain.v1`, …); the old keys are left in place. The theme
+  and the dashboard password are global and keep their keys.
+- **Timers.** The console refreshes only the view on screen, and a reply that arrives after
+  you moved to another view is dropped. Leaving Option Scan stops its auto-refresh, and
+  leaving Stock Intraday switches off the scanner's auto-rescan (Run arms it again).
 
 ### Options scan
 
@@ -199,14 +305,27 @@ spot (or the near-month future), and tabulates the ATM strike plus *N* OTM strik
 side — calls above, puts below:
 
 ```
-CONTRACT                   TYPE   STRIKE  MONEY      LTP     Advanced VWAP  >Advanced VWAP     RSI  EMA(RSI)    EMA21   SUPERT    ADX  READY
-NIFTY 23250 PE               PE    23250  OTM+2   200.61   196.74    yes   68.56     62.35   199.79   200.50   32.9  READY
+CONTRACT                   TYPE   STRIKE  MONEY       LTP      VWAP  >VWAP     RSI  EMA(RSI)    EMA21    SUPERT    ADX  READY
+NIFTY 23250 PE               PE    23250  OTM+2    200.61    196.74    yes   68.56     62.35   199.79    200.50   32.9  READY
 ```
 
 Rows meeting every entry condition are flagged `READY` and highlighted. The
 `Blocking condition` column tells you exactly which test failed for the others. (That is
-the `run.py chain` output; the console's Options tab shows the same columns without
-`MONEY`.) The Trade tab's watches carry the same **Ready** column.
+the `run.py chain` output; the console's Option Buyer → Option Scan view shows the same
+columns without `MONEY`.) The Trade view's watches carry the same **Ready** column.
+
+The Option Scan view chooses what READY means for its own table. **Conditions for READY**
+lists price above VWAP (session), RSI above EMA(RSI), price above EMA, price above Supertrend
+and ADX above the minimum. Every ticked one must hold (AND); an unticked one still shows its
+value. Each has its own timeframe (blank = the scan timeframe) and editable periods: RSI and
+EMA(RSI), EMA, the Supertrend ATR period and factor, the ADX period and minimum. They start
+as Option Buyer's strategy (VWAP, RSI, Supertrend and ADX ticked, EMA not), are kept in this
+browser, and **Use Option Buyer's strategy** puts them back. The values come from the same
+indicator code the engine runs. They apply to the scan only: a Watch added from the table
+waits for the Strategy entry conditions, and the view says so whenever the two differ. The
+API takes the same choices as `vwap_on`, `rsi_on`, `ema_on`, `st_on`, `adx_on`, `*_tf`,
+`rsi_period`, `rsi_signal_period`, `ema_period`, `st_period`, `st_factor` and `adx_period`
+on `/api/options/chain`; without them the scan is the engine's gate, as before.
 
 ### Option chain
 
@@ -239,7 +358,7 @@ keep many charts open.
 
 ## Scanner
 
-The **Scanner** tab (and `run.py scan`) checks a universe of NSE/BSE stocks and MCX
+The Stock Intraday **Scanner** view (and `run.py scan`) checks a universe of NSE/BSE stocks and MCX
 commodities against a BUY list of conditions and its mirror-image SELL list, on live data.
 It is read-only: it never places an order, creates an approval or adds a watch by itself.
 Each result row offers Chart and Watch (NSE/BSE equities; MCX gets Chart only).
@@ -253,7 +372,7 @@ Default BUY conditions, all joined with AND (saved under `scanner:` in `config.y
 | 3 | 1D | price above Supertrend(21, 0.618) |
 | 4 | 2h | price above Supertrend(21, 0.618) |
 | 5 | 5m | price above Supertrend(21, 0.618) |
-| 6 | 15m | price above Advanced VWAP |
+| 6 | 15m | price above VWAP (session) |
 | 7 | 15m | RSI(21) at or above EMA(RSI(21), 14) |
 
 SELL mirrors BUY with the exit-condition rules (above ↔ below, RSI levels reflected around
@@ -286,7 +405,8 @@ The estimate, progress, ETA and a Cancel are on screen. One scan runs at a time 
 
 **Auto-rescan** (off by default) repeats the scan every 2–60 minutes while the console is
 open. Loading the page never starts it: it is armed by pressing Run, refused when the repeat
-cost would exceed the scanner cap, and stopped by Off, Cancel or closing the page.
+cost would exceed the scanner cap, and stopped by Off, Cancel, leaving Stock Intraday or
+closing the page.
 
 ```bash
 .venv/bin/python run.py scan --universe nifty50 --side both --values
@@ -316,7 +436,7 @@ Limitations:
 
 `cache/` (the scanner's history windows, `cache/scan/`, plus the instrument masters) sits
 next to `run.py`. If the project folder is synced by OneDrive, iCloud Drive or Dropbox,
-exclude `cache/` from sync, or run Matheran from a non-synced directory. A first scan of the
+exclude `cache/` from sync, or run Saidarshan from a non-synced directory. A first scan of the
 day writes about 1,000–1,500 small files there, and a running scan refreshes
 `cache/scan/.running` every 2 s and `cache/scan/ledger.json` every 10 s. The app logs a
 notice when it detects this.
@@ -353,6 +473,19 @@ fetched from a CDN.
   timeframe (the chart's, or any other), ATR period and factor. A higher timeframe's line
   shows on each chart bar the value it had at that moment, and settles on the higher
   bar's own value when it closes.
+- **VWAP (session)** is the centerline the strategy and the scanner compare against.
+  **Advanced VWAP Bands** adds only the upper and lower bands around it (see
+  *Advanced VWAP Bands* above), with the multiplier edited in the picker and shown in its
+  label (`Advanced VWAP Bands (±2σ)`) and on the price axis (`+2σ` / `−2σ`). The upper
+  band is long-dashed and the lower one dotted, so they differ without colour. Turning
+  both on draws the centerline once. The multiplier changes only the bands; no order,
+  signal, scan, watch or P&L reads them.
+- **Supertrend** draws exactly one line per bar: solid below price in an uptrend, dashed
+  above price in a downtrend. A flip ends one line and starts the other with no
+  connector across price, the latest bar carries a dot, and the price axis labels the
+  current state (`ST ▲ up`, `ST1 15m ▼ down`, …) so it does not depend on colour.
+  Several Supertrends on one pane are told apart by their tag and timeframe. A refresh
+  that brings no data clears the old lines rather than leaving them stale.
 - **Symbol textbox, not a dropdown**: type and the server suggests as you go. It matches
   tickers and company names (`vishal` finds VMM), index spots, futures, option
   contracts (`NIFTY 25000 CE`, `BANKNIFTY55000PE`) and saved baskets by name. Up/Down and
@@ -362,8 +495,10 @@ fetched from a CDN.
   Supertrend's uptrend and downtrend separately, and up/down candles (volume follows).
   Colours apply instantly without a refetch, and *Reset colours* restores the defaults.
 - **Time axis in IST**, so the open reads 09:15 rather than the UTC 03:45.
-- **Remembered across reloads** in `localStorage`: chart count, each pane's symbol and
-  timeframe, data source, refresh interval, axis sync, indicators and colours.
+- **Remembered across reloads** in `localStorage`, separately for each workspace: chart
+  count, each pane's symbol and timeframe, data source, refresh interval, axis sync,
+  indicators, their parameters, colours and drawings. `?symbols=` and `?tf=` in the
+  address still open the given symbols.
 - Candles plus a volume histogram, optional time-axis sync across panes, and a refresh
   interval (off / 5s / 15s / 60s). Refreshes push only new bars via `series.update()`,
   so your zoom and pan survive.
@@ -406,7 +541,7 @@ poll interval.
 ## Baskets
 
 A basket is a set of buy and sell legs sent together: a spread, a straddle, a hedged
-future, a stock pair. Build one on the console's **Baskets** tab, where each leg is a
+future, a stock pair. Build one in Option Seller → **Basket**, where each leg is a
 symbol textbox, a BUY/SELL side and a lot count (shares for stocks). Or build it from
 the option chain with the B / S buttons. Lots are converted with the contract's real lot
 size when the basket is saved.
@@ -436,7 +571,7 @@ rupee value beside it. When every leg is on one underlying, each bar's
 high and low are the combination valued at the underlying's high and low moments:
 calls, futures and stock at their highs and puts at their lows, then the reverse. That
 gives a range the basket could actually have traded, rather than every leg's best case
-at once. Advanced VWAP, Supertrend, RSI and the rest are computed on that series.
+at once. VWAP, the VWAP bands, Supertrend, RSI and the rest are computed on that series.
 
 ### The combo screen
 
@@ -448,7 +583,7 @@ at once. Advanced VWAP, Supertrend, RSI and the rest are computed on that series
 |  underlying spot     |  call legs           |
 +----------------------+----------------------+
 |  combined premium    |  put legs            |
-|  Advanced VWAP, EMA 1, EMA 2, |                      |
+|  VWAP + bands, EMAs, |                      |
 |  Supertrend, table   |                      |
 +----------------------+----------------------+
 ```
@@ -459,15 +594,18 @@ summed, on opposite sides differenced (unsigned); three or more are the signed n
 table's P/L keeps the real lots. **Bar range** picks how the combo's high and low are inferred:
 *Spot linked* (the default: the combo valued at the underlying's high, calls high and puts
 low, and at its low), *Body only*, or *Sum leg wicks*. The call and put charts show the CE
-and the PE legs alone, as absolute values or signed. Advanced VWAP (session), two EMAs (9, 21) and
-Supertrend (factor 3, ATR 10) are computed on the combo and adjustable. The table lists
-each leg's strike, side, lots, entry, LTP and P/L, then CALLS, PUTS and TOTAL, in points
-or rupees. Entries come from the legs' open positions once the basket is executed.
+and the PE legs alone, as absolute values or signed. VWAP (session), the Advanced VWAP
+Bands (±2σ by default, on the spot and combo charts), two EMAs (9, 21) and Supertrend
+(factor 3, ATR 10) are computed on the combo and adjustable. The table lists each leg's
+strike, side, lots, entry, LTP and P/L, then the CALLS and PUTS summaries, in points or
+rupees. There is no TOTAL row on screen; the API still returns the total. Entries come
+from the legs' open positions once the basket is executed.
 
 Open it from a basket card's **Combo** button, from the option chain's **Combo chart ↗**
 button (the legs on the builder, no need to save), or directly as
-`/combo?basket=<id>` or `/combo?legs=opt:NIFTY:2026-10-06:25000:CE@BUY@1,...`. On a narrow
-screen the four charts stack in reading order: spot, combo, calls, puts.
+`/app/option-seller/combo-chart?basket=<id>` (or the old `/combo?basket=<id>`) or
+`/combo?legs=opt:NIFTY:2026-10-06:25000:CE@BUY@1,...`. On a narrow screen the four charts
+stack in reading order: spot, combo, calls, puts.
 
 ### Swapping the data source
 
@@ -577,7 +715,7 @@ do point `data_broker` at Dhan without it, every candle request returns `806 / D
 and the adapter turns that into a plain-English error naming the fix, surfaced as a
 banner in the console rather than retried forever.
 
-Dhan access tokens last **24 hours**. Paste a fresh one into the Setup tab each day, or
+Dhan access tokens last **24 hours**. Paste a fresh one into System settings each day, or
 set up TOTP and script `auth.dhan.co/app/generateAccessToken`.
 
 ---
@@ -619,7 +757,7 @@ run.py                      CLI: serve / selfcheck / doctor / chain / scan
 config.example.yaml          copy to config.yaml (the UI writes this file)
 .env.example                 copy to .env (or let the UI create it)
 matheran/
-  indicators.py              Advanced VWAP, RSI, EMA, RMA, ATR, Supertrend, ADX  (TradingView semantics)
+  indicators.py              session VWAP and its bands, RSI, EMA, RMA, ATR, Supertrend, ADX  (TradingView semantics)
   candles.py                 candle model, epoch normalisation, resampling (minutes to months), bar close times
   timeframes.py              the timeframe table, and loading candles at any of them (recent feed + history)
   chart_types.py             Heikin Ashi and Renko
@@ -637,11 +775,14 @@ matheran/
   baskets.py                 basket legs, storage, and the combined value series
   combo.py                   the TradingView combo script's arithmetic: combo, call and put baskets
   chart_indicators.py        indicator series for the charts, same maths as the engine
-  dashboard.py               the console (single file, no build step)
+  workspaces.py              the three workspaces: ids, child views, record ownership, scoped settings
+  app_pages.py               the landing portal, the app shell around every page, the 404 page
+  dashboard.py               the /app console (single file, no build step)
   charts_page.py             the multi-pane chart grid with the trade ticket (plain HTML/CSS)
   chain_page.py              the one-page option chain with the basket builder
   combo_page.py              the 2 × 2 basket combo screen
-  static/                    vendored Lightweight Charts v5.2.1 (Apache-2.0)
+  static/                    vendored Lightweight Charts v5.2.1 (Apache-2.0), the theme, the app
+                             shell (app-shell.css / app-shell.js) and the favicon
   brokers/base.py            the interface to implement
   brokers/composite.py       splits market data and order execution across two brokers
   brokers/dhan.py            DhanHQ v2 (execution + optional paid data)
@@ -656,12 +797,12 @@ matheran/
 
 ## Verification
 
-`run.py selfcheck` ships with the project (80 checks). During development the engine,
+`run.py selfcheck` ships with the project (105 checks). During development the engine,
 HTTP and settings layers were also verified and all passed:
 
 | Suite | Checks | Covers |
 |---|---|---|
-| selfcheck | 80 | indicators vs an independent reference implementation (ZEMA included), resampling into minutes, hours, days, weeks and months, bar close times, Heikin Ashi, Renko, basket premium weights, tick rounding, 3% stop maths, Advanced VWAP with and without volume, strategy wiring, scanner rows, mirroring, sessions, cache reuse and the request budget |
+| selfcheck | 105 | indicators vs an independent reference implementation (ZEMA included), resampling into minutes, hours, days, weeks and months, bar close times, Heikin Ashi, Renko, basket premium weights, tick rounding, 3% stop maths, session VWAP and the VWAP bands with and without volume, the Supertrend chart payload (one value and one direction per bar, stable closed 15m bars), the workspace rules and scoped settings, strategy wiring, scanner rows, mirroring, sessions, cache reuse and the request budget |
 | engine | 62 | full lifecycle, target/stop/indicator/square-off exits, approval expiry, rejection, market-hours and daily caps, halt, broker-stop failure, restart adoption, persistence |
 | api | 74 | auth, watch CRUD, diagnostics, options chain shape, option lot sizing, approvals, controls |
 | settings | 83 | `.env` parsing and 0600 permissions, masking, clear-vs-untouched semantics, config validation and rollback, live-mode guard, key generation taking effect immediately, broker swap refusal while in position |

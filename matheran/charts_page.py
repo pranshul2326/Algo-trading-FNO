@@ -6,7 +6,7 @@ CHARTS_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <script src="/static/ui-theme.js"></script>
-<title>Matheran charts</title>
+<title>Chart · Saidarshan</title>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
@@ -183,6 +183,7 @@ CHARTS_HTML = r"""<!DOCTYPE html>
   .dropbody .pp input { width:62px; padding:2px 5px; font-size:12px; }
   .dropbody .pp input.bad { border-color:var(--down); }
   .dropbody .pp select { padding:2px 5px; font-size:12px; }
+  .dropbody p.hint { margin:0 0 6px 52px; font-size:11.5px; color:var(--muted); max-width:300px; }
 
   body { display:flex; flex-direction:column; }
   main { flex:1; min-height:0; height:auto; }
@@ -214,8 +215,7 @@ CHARTS_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>Matheran charts <a href="/">← console</a> <a href="/chain">option chain ↗</a>
-    <a href="/combo">basket combo ↗</a></h1>
+  <h1 class="sr" id="pageTitle">Chart</h1>
   <label class="f" for="count">Number of charts
     <select id="count">
       <option value="1">1 — full screen</option>
@@ -362,9 +362,19 @@ CHARTS_HTML = r"""<!DOCTYPE html>
 "use strict";
 const LWC = window.LightweightCharts;
 const $ = (id) => document.getElementById(id);
-const STORE = "matheranCharts.v1";
+/* The workspace this chart grid belongs to (app shell), or null on the original /charts.
+   Each workspace keeps its own layout, panes, indicators, colours and drawings; the
+   first visit starts from a copy of the original layout, which stays as it was. */
+const WS = (window.SAIDARSHAN_CONTEXT && window.SAIDARSHAN_CONTEXT.workspace) || null;
+const WS_STORE = window.SaidarshanStore || { key: (k) => k, migrate: () => false };
+WS_STORE.migrate("matheranCharts.v1");
+WS_STORE.migrate("matheranCharts.drawings.v1");
+const STORE = WS_STORE.key("matheranCharts.v1");
 const COUNTS = [1, 2, 4, 6, 8];
 const KEY = sessionStorage.getItem("mthKey") || "";
+/* ?workspace= on every call whose answer depends on the workspace's settings. */
+const wsq = (path) => (WS ? path + (path.indexOf("?") >= 0 ? "&" : "?") + "workspace=" + encodeURIComponent(WS) : path);
+const WS_NAME = { stock_intraday: "Stock Intraday", option_buyer: "Option Buyer", option_seller: "Option Seller" };
 
 const DEFAULTS = ["idx:NIFTY", "idx:BANKNIFTY", "eq:NSE:RELIANCE", "eq:NSE:TCS",
                   "eq:NSE:HDFCBANK", "eq:NSE:INFY", "eq:NSE:SBIN", "eq:NSE:ITC"];
@@ -491,6 +501,8 @@ function colour(key, fallback) {
    their downtrend colour under "<id>:down". */
 function colourFor(spec, side) {
   if (side === "down") return colour(spec.id + ":down", spec.color_down || spec.color);
+  // Advanced VWAP Bands keep the lower band's colour under "<id>:lower".
+  if (side === "lower") return colour(spec.id + ":lower", spec.color_lower || spec.color);
   return colour(spec.id, spec.color);
 }
 function candleColours() {
@@ -588,7 +600,9 @@ function makePane(index) {
 
   const pane = {
     index, el, chart, candles, volume, cfg,
-    ind: {},          // indicator id -> [series] (two series for up/down indicators)
+    ind: {},          // indicator id -> [series] (two series for up/down and band indicators)
+    indPoints: {},    // indicator id -> the points last drawn
+    trendMarks: {},   // Supertrend id -> its latest-bar markers and price-axis label
     bars: [],         // bars last drawn, so a colour change can repaint the volume
     lastTime: 0, loaded: false,
     meta: null,       // lot and tick size of the symbol on screen
@@ -651,8 +665,10 @@ function buildIndicatorSeries(pane) {
   // delta keeps toggling cheap and leaves the price pane untouched.
   for (const [id, list] of Object.entries(pane.ind)) {
     if (!state.indicators.includes(id)) {
+      clearTrendMark(pane, id);
       for (const series of list) { try { pane.chart.removeSeries(series); } catch (e) {} }
       delete pane.ind[id];
+      delete pane.trendMarks[id];
     }
   }
   for (const spec of CATALOG) {
@@ -663,12 +679,26 @@ function buildIndicatorSeries(pane) {
       title: spec.overlay ? "" : spec.id,
     };
     if (spec.color_down) {
-      // One series per trend side, each carrying values only while its side is
-      // active. The line therefore breaks at a flip instead of drawing a diagonal
-      // from one band to the other, and each side takes its own colour.
+      // One series per trend side: solid for the uptrend, dashed for the downtrend,
+      // so the side reads without colour too. Each carries values only on its own
+      // side's bars; see setTrendData for how a run ends without a connector.
+      const up = pane.chart.addSeries(LWC.LineSeries,
+        { ...base, color: colourFor(spec, "up"), lineStyle: LWC.LineStyle.Solid }, spec.pane);
+      const down = pane.chart.addSeries(LWC.LineSeries,
+        { ...base, color: colourFor(spec, "down"), lineStyle: LWC.LineStyle.Dashed }, spec.pane);
+      pane.ind[spec.id] = [up, down];
+      pane.trendMarks[spec.id] = {
+        markers: [LWC.createSeriesMarkers(up, []), LWC.createSeriesMarkers(down, [])],
+        line: null,   // { series, priceLine } labelling the current side on the price axis
+      };
+    } else if (spec.bands) {
+      // Upper dashed, lower dotted, each titled on the price axis: distinguishable
+      // without relying on colour.
       pane.ind[spec.id] = [
-        pane.chart.addSeries(LWC.LineSeries, { ...base, color: colourFor(spec, "up") }, spec.pane),
-        pane.chart.addSeries(LWC.LineSeries, { ...base, color: colourFor(spec, "down") }, spec.pane),
+        pane.chart.addSeries(LWC.LineSeries, { ...base, color: colourFor(spec, "up"),
+          lineStyle: LWC.LineStyle.LargeDashed, lastValueVisible: true, title: bandTitle(spec, 1) }, spec.pane),
+        pane.chart.addSeries(LWC.LineSeries, { ...base, color: colourFor(spec, "lower"),
+          lineStyle: LWC.LineStyle.Dotted, lastValueVisible: true, title: bandTitle(spec, -1) }, spec.pane),
       ];
     } else {
       pane.ind[spec.id] = [
@@ -686,16 +716,91 @@ function buildIndicatorSeries(pane) {
   } catch (e) { /* older builds without pane stretch */ }
 }
 
+const specById = (id) => CATALOG.find((s) => s.id === id);
+const CLEAR = "rgba(0,0,0,0)";
+
+/* "+2σ" / "−2σ" for the band lines' price-axis titles. */
+function bandTitle(spec, sign) {
+  const m = Number(paramValue(spec, "multiplier"));
+  const text = Number.isFinite(m) ? String(m) : "2";
+  return (sign > 0 ? "+" : "−") + text + "σ";
+}
+/* Short name of a Supertrend for its price-axis label: ST, or ST1 / ST2 with the
+   timeframe, so two different Supertrends are never mistaken for one. */
+function trendTag(spec) {
+  if (spec.id === "st_tf1" || spec.id === "st_tf2") {
+    const tf = paramValue(spec, "tf");
+    return (spec.id === "st_tf1" ? "ST1" : "ST2") + (tf && tf !== "chart" ? " " + tf : "");
+  }
+  return "ST";
+}
+
+/* One side of a Supertrend: values on that side's bars, whitespace elsewhere.
+   Lightweight Charts joins a line across whitespace, and paints the segment from a
+   point to the next one in that point's colour. So the last point of each run is
+   given a transparent colour: the segment that would cross the opposite run (the
+   "connector" that made both sides look active at once) is never drawn. Every other
+   point takes the series colour, so a colour change needs no reseeding. */
+function trendSide(points, side) {
+  const out = new Array(points.length);
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    if (p.trend !== side) { out[i] = { time: p.time }; continue; }
+    const next = points[i + 1];
+    out[i] = next && next.trend !== side
+      ? { time: p.time, value: p.value, color: CLEAR }
+      : { time: p.time, value: p.value };
+  }
+  return out;
+}
+
+function clearTrendMark(pane, id) {
+  const mark = pane.trendMarks[id];
+  if (!mark) return;
+  if (mark.line) {
+    try { mark.line.series.removePriceLine(mark.line.priceLine); } catch (e) {}
+    mark.line = null;
+  }
+  for (const m of mark.markers) { try { m.setMarkers([]); } catch (e) {} }
+}
+/* The current side, on the latest bar only: a dot on the active line (a trend that
+   turned on this very bar has a one-point run, which draws no segment) and a
+   price-axis label saying which side, in words as well as colour. */
+function markCurrentTrend(pane, id, points) {
+  const spec = specById(id), mark = pane.trendMarks[id], list = pane.ind[id];
+  if (!spec || !mark || !list) return;
+  clearTrendMark(pane, id);
+  const last = points[points.length - 1];
+  if (!last) return;
+  const up = last.trend === -1;
+  const series = up ? list[0] : list[1];
+  const colour = colourFor(spec, up ? "up" : "down");
+  mark.markers[up ? 0 : 1].setMarkers([{ time: last.time, position: "atPriceMiddle",
+    price: last.value, shape: "circle", color: colour, size: 0.6 }]);
+  mark.line = { series, priceLine: series.createPriceLine({
+    price: last.value, color: colour, lineVisible: false, axisLabelVisible: true,
+    title: `${trendTag(spec)} ${up ? "▲ up" : "▼ down"}` }) };
+}
+
 function setIndicatorData(pane, id, points) {
   const list = pane.ind[id];
   if (!list) return;
-  if (list.length === 2) {
-    // trend -1 is an uptrend (first series), +1 a downtrend (second). A bare
-    // {time} is whitespace, which is what breaks the line.
-    list[0].setData(points.map((p) =>
-      p.trend === -1 ? { time: p.time, value: p.value } : { time: p.time }));
-    list[1].setData(points.map((p) =>
-      p.trend === -1 ? { time: p.time } : { time: p.time, value: p.value }));
+  const spec = specById(id) || {};
+  points = points || [];
+  pane.indPoints[id] = points;
+  if (spec.color_down && list.length === 2) {
+    // trend -1 is an uptrend (first series), +1 a downtrend (second). setData
+    // replaces both sides whole, so no point of an old side can linger.
+    list[0].setData(trendSide(points, -1));
+    list[1].setData(trendSide(points, 1));
+    markCurrentTrend(pane, id, points);
+    return;
+  }
+  if (spec.bands && list.length === 2) {
+    list[0].applyOptions({ title: bandTitle(spec, 1) });
+    list[1].applyOptions({ title: bandTitle(spec, -1) });
+    list[0].setData(points.map((p) => ({ time: p.time, value: p.upper })));
+    list[1].setData(points.map((p) => ({ time: p.time, value: p.lower })));
     return;
   }
   list[0].setData(points.map((p) => ({ time: p.time, value: p.value })));
@@ -920,7 +1025,7 @@ async function refreshPane(pane) {
     if (params) q.set("params", params);
   }
   try {
-    const d = await api("/api/charts/candles?" + q.toString());
+    const d = await api(wsq("/api/charts/candles?" + q.toString()));
     // The pane was re-pointed while this was in flight; its answer belongs to nobody.
     if (paneSig(pane) !== sig) return;
     const bars = d.bars || [];
@@ -934,6 +1039,14 @@ async function refreshPane(pane) {
       pane.emptyEl.textContent = chartType === "renko"
         ? "no bricks yet: the price has not moved a whole box" : "no data for this symbol / timeframe";
       pane.emptyEl.hidden = false;
+      if (!pane.loaded) {
+        // Nothing for the new symbol or timeframe: drop the previous one's candles and
+        // lines rather than leave them under the message.
+        pane.candles.setData([]);
+        pane.volume.setData([]);
+        pane.bars = [];
+        for (const id of Object.keys(pane.ind)) setIndicatorData(pane, id, []);
+      }
       return;
     }
     pane.emptyEl.hidden = true;
@@ -963,9 +1076,10 @@ async function refreshPane(pane) {
     }
     pane.bars = bars;
     // Indicator series are always re-seeded: they are small, and a partial update
-    // would leave stale points behind when the warmup window shifts.
+    // would leave stale points behind when the warmup window shifts. A line the
+    // answer has nothing for is emptied, not left showing the previous answer.
     const series = d.indicators || {};
-    for (const [id, points] of Object.entries(series)) setIndicatorData(pane, id, points);
+    for (const id of Object.keys(pane.ind)) setIndicatorData(pane, id, series[id] || []);
 
     pane.lastTime = bars[bars.length - 1].time;
 
@@ -1047,14 +1161,14 @@ const defaultStopPct = () => (STATUS && STATUS.risk && STATUS.risk.stop_loss_pct
 
 async function loadStatus() {
   try {
-    STATUS = await api("/api/status");
+    STATUS = await api(wsq("/api/status"));
     MODE = STATUS.mode || MODE;
   } catch (e) { /* the panes report auth and connection problems */ }
   panes.forEach(updateTradeButton);
 }
 async function loadTrades() {
   try {
-    const d = await api("/api/charts/trades");
+    const d = await api(wsq("/api/charts/trades"));
     TRADES = d.trades || [];
     if (d.mode) MODE = d.mode;
   } catch (e) { /* keep the last known list */ }
@@ -1180,7 +1294,7 @@ function openTicket(pane) {
   const fno = lot > 1 || /^(opt|fut):/.test(pane.cfg.symbol);
   $("tkTitle").textContent = "Trade " + labelFor(pane.cfg.symbol);
   $("tkSub").textContent = `LTP ${fmt(pane.ltp)} · ${fno ? "lot size " + lot : "cash, 1 share per unit"}` +
-    ` · tick ${tick} · ${pane.cfg.timeframe} chart`;
+    ` · tick ${tick} · ${pane.cfg.timeframe} chart` + (WS ? ` · ${WS_NAME[WS] || WS}` : "");
   $("tkMode").className = "mode " + (isLive() ? "live" : "paper");
   $("tkMode").textContent = isLive() ? "LIVE · this sends a REAL order to your broker"
                                      : "PAPER · orders are simulated";
@@ -1376,6 +1490,8 @@ $("tkForm").onsubmit = async (ev) => {
       "\n\nSend it?")) return;
   const priceExits = v.exitMode !== "strategy";
   const body = {
+    // The order belongs to the workspace this chart is open in (none on /charts).
+    workspace: WS,
     symbol: pane.cfg.symbol, side: v.side, lots: v.lots, order_type: v.type,
     limit_price: v.type === "MARKET" ? null : v.limit,
     trigger_price: v.type === "GTT" ? v.trigger : null,
@@ -1413,7 +1529,7 @@ $("tkForm").onsubmit = async (ev) => {
    on every chart of that symbol, at any timeframe. Points are stored as (time, price)
    and placed between bars by interpolation, so a line drawn on 5-minute candles lands
    in the same place on 1-minute or hourly ones. Kept in this browser's localStorage. */
-const DRAW_STORE = "matheranCharts.drawings.v1";
+const DRAW_STORE = WS_STORE.key("matheranCharts.drawings.v1");
 const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
 const TWO_POINT = new Set(["trend", "ray", "rect", "fib"]);
 const NEAR_PX = 6;
@@ -1908,6 +2024,9 @@ function indLabel(spec) {
   if (spec.id === "zema_fast" || spec.id === "zema_slow") {
     return `ZEMA(${paramValue(spec, "period")}) zero-lag EMA`;
   }
+  if (spec.bands) {
+    return `${spec.label} (±${paramValue(spec, "multiplier")}σ)`;
+  }
   if (spec.id === "st_tf1" || spec.id === "st_tf2") {
     const tf = paramValue(spec, "tf");
     return `Supertrend ${tf === "chart" ? "(chart timeframe)" : tf} ` +
@@ -1951,13 +2070,19 @@ function renderIndicatorPicker() {
         ${spec.color_down
           ? colourInput(spec.id, colourFor(spec, "up"), indLabel(spec) + " — uptrend colour") +
             colourInput(spec.id + ":down", colourFor(spec, "down"), indLabel(spec) + " — downtrend colour")
+          : spec.bands
+          ? colourInput(spec.id, colourFor(spec, "up"), indLabel(spec) + " — upper band colour") +
+            colourInput(spec.id + ":lower", colourFor(spec, "lower"), indLabel(spec) + " — lower band colour")
           : colourInput(spec.id, colourFor(spec), indLabel(spec) + " colour")}
         <label for="ind-${esc(spec.id)}" id="indl-${esc(spec.id)}">${esc(indLabel(spec))}${spec.color_down
-          ? ' <span class="mut">up / down</span>' : ""}</label>
-      </div>${paramRow(spec)}`).join("");
+          ? ' <span class="mut">up solid / down dashed</span>'
+          : spec.bands ? ' <span class="mut">upper dashed / lower dotted</span>' : ""}</label>
+      </div>${paramRow(spec)}${spec.bands
+        ? '<p class="hint">Bands only: the centerline is VWAP (session). Chart only; no signal uses the bands.</p>'
+        : ""}`).join("");
   }
   html += `<div class="foot"><button type="button" id="resetColours">Reset colours</button>
-    <button type="button" id="resetParams" title="ZEMA 50 / 200; Supertrend chart timeframe and 15m, ATR 10, factor 3">Reset parameters</button></div>`;
+    <button type="button" id="resetParams" title="Band multiplier 2; ZEMA 50 / 200; Supertrend chart timeframe and 15m, ATR 10, factor 3">Reset parameters</button></div>`;
   $("indList").innerHTML = html;
 
   // Parameters refetch, since the server computes the lines.
@@ -2044,7 +2169,9 @@ function applyColours() {
       if (!list) continue;
       try {
         list[0].applyOptions({ color: colourFor(spec, "up") });
-        if (list[1]) list[1].applyOptions({ color: colourFor(spec, "down") });
+        if (list[1]) list[1].applyOptions({ color: colourFor(spec, spec.bands ? "lower" : "down") });
+        // The latest-bar dot and the axis label carry the colour as well.
+        if (spec.color_down) markCurrentTrend(pane, spec.id, pane.indPoints[spec.id] || []);
       } catch (e) {}
     }
   }
@@ -2066,7 +2193,7 @@ async function boot() {
     return;
   }
   try {
-    const d = await api("/api/charts/sources");
+    const d = await api(wsq("/api/charts/sources"));
     const list = d.sources || [];
     $("source").innerHTML = list.map((s) =>
       `<option value="${esc(s.name)}">${esc(s.label)}</option>`).join("");
@@ -2087,9 +2214,10 @@ async function boot() {
     save();
   } catch (e) {
     setStatus(e.message + (String(e.message).indexOf("X-API-Key") >= 0
-      ? "  →  open the console first and enter the dashboard password" : ""), true);
+      ? "  →  open Saidarshan (/app) first and enter the dashboard password" : ""), true);
     return;
   }
+  if (WS) $("pageTitle").textContent = "Chart · " + (WS_NAME[WS] || WS);
   applyUrlRequest();
   applyControls();
   await Promise.all([loadSymbols(), loadStatus()]);

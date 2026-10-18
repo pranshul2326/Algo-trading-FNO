@@ -12,6 +12,7 @@ be rebuilt without restarting the service.
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import yaml
 
+from . import workspaces as ws_mod
 from .config import Config, Secrets
 
 log = logging.getLogger(__name__)
@@ -42,10 +44,11 @@ class CredSpec:
 CREDENTIALS: tuple[CredSpec, ...] = (
     CredSpec(
         "MATHERAN_API_KEY",
-        "Password for this dashboard",
+        "Saidarshan dashboard password",
         "service",
         "Stops anything else on this machine from calling the API and firing a trade. "
-        "Mandatory if you bind to anything other than 127.0.0.1.",
+        "Mandatory if you bind to anything other than 127.0.0.1. Stored as "
+        "MATHERAN_API_KEY in .env.",
     ),
     CredSpec(
         "DHAN_CLIENT_ID",
@@ -100,7 +103,7 @@ CREDENTIAL_KEYS = {c.key for c in CREDENTIALS}
 
 GROUPS: dict[str, dict] = {
     "service": {
-        "label": "This dashboard (not a broker)",
+        "label": "Saidarshan dashboard (not a broker)",
         "requires": ["MATHERAN_API_KEY"],
         "note": "A password you choose, for this app only. It is unrelated to your "
         "broker accounts. Press Generate below and it is saved and applied at once; "
@@ -217,7 +220,7 @@ class EnvFile:
         if new_keys:
             if out and out[-1].strip():
                 out.append("")
-            out.append("# written by the Matheran settings UI")
+            out.append("# written by the Saidarshan settings UI")
             for key in new_keys:
                 out.append(f"{key}={_quote(updates[key])}")
                 touched.append(key)
@@ -344,12 +347,88 @@ class SettingsManager:
             "risk": _dump(c.risk),
             "options": _dump(c.options),
             "scanner": _dump(c.scanner),
+            # Only the parts a workspace saved for itself; the rest follow the
+            # sections above (workspaces.py).
+            "workspaces": ws_mod.snapshot(c),
             "warmup_bars": c.strategy.warmup_bars(),
             "config_file": str(self.config_path.resolve()),
         }
 
+    def workspace_snapshot(self, workspace: str) -> dict:
+        """One workspace's effective strategy, risk and setup defaults, and which of
+        them were saved for it rather than followed from the top-level sections."""
+        settings = self.cfg.workspace(workspace)
+        return {
+            "id": workspace,
+            "label": ws_mod.label_of(workspace),
+            "strategy": _dump(settings.strategy),
+            "risk": _dump(settings.risk),
+            "defaults": dict(settings.defaults),
+            "customised": dict(settings.customised),
+            "warmup_bars": settings.strategy.warmup_bars(),
+        }
+
+    def update_workspace(self, workspace: str, patch: dict) -> dict:
+        """Save strategy / risk / setup defaults for one workspace only.
+
+        The other workspaces and the top-level sections are untouched: each workspace
+        holds its own deep copies, so no assignment here can reach another one.
+        """
+        from .config import validate
+
+        if workspace not in ws_mod.WORKSPACES:
+            raise ValueError(f"unknown workspace {workspace!r}")
+        unknown = set(patch) - {"strategy", "risk", "defaults"}
+        if unknown:
+            raise ValueError(f"unknown workspace settings sections: {sorted(unknown)}")
+        current = self.cfg.workspace(workspace)
+        before = copy.deepcopy(current)
+        try:
+            for part in ("strategy", "risk"):
+                values = patch.get(part)
+                if values is None:
+                    continue
+                obj = getattr(current, part)
+                for key, value in values.items():
+                    if key not in obj.__dataclass_fields__:
+                        raise ValueError(f"unknown {part} setting: {key}")
+                    setattr(obj, key, copy.deepcopy(value))
+                current.customised[part] = True
+            if patch.get("defaults") is not None:
+                current.defaults = ws_mod.check_defaults(
+                    workspace, patch["defaults"], ws_mod.defaults_schema(self.cfg),
+                    base=current.defaults,
+                )
+                current.customised["defaults"] = True
+            validate(self.cfg)
+        except Exception:
+            self.cfg.workspaces[workspace] = before
+            raise
+        self.persist_config()
+        return self.workspace_snapshot(workspace)
+
+    def reset_workspace(self, workspace: str, parts: list[str]) -> dict:
+        """Stop saving the given parts for a workspace: they follow the top-level
+        sections again (deep copies, as on first load)."""
+        if workspace not in ws_mod.WORKSPACES:
+            raise ValueError(f"unknown workspace {workspace!r}")
+        bad = set(parts) - {"strategy", "risk", "defaults"}
+        if bad or not parts:
+            raise ValueError("parts must be any of strategy, risk, defaults")
+        current = self.cfg.workspace(workspace)
+        for part in parts:
+            current.customised[part] = False
+        ws_mod.refresh_followers(self.cfg)
+        self.persist_config()
+        return self.workspace_snapshot(workspace)
+
     def update_config(self, patch: dict) -> dict:
-        """Apply a partial config update, validate it, then persist to config.yaml."""
+        """Apply a partial config update, validate it, then persist to config.yaml.
+
+        `strategy` and `risk` here are the top-level sections: legacy watches no
+        workspace owns read them, and so does every workspace that has not saved its
+        own (refreshed below). That keeps API callers from before workspaces working.
+        """
         from .config import validate
 
         sections = {
@@ -393,6 +472,9 @@ class SettingsManager:
                     setattr(obj, key, value)
             raise
 
+        # Workspaces that follow the top-level sections pick up the change, as deep
+        # copies; a workspace that saved its own keeps it.
+        ws_mod.refresh_followers(self.cfg)
         self.persist_config()
         return self.config_snapshot()
 
@@ -400,8 +482,16 @@ class SettingsManager:
         snapshot = self.config_snapshot()
         snapshot.pop("warmup_bars", None)
         snapshot.pop("config_file", None)
+        if not snapshot.get("workspaces"):
+            # Nothing saved per workspace yet: leave config.yaml exactly as before.
+            snapshot.pop("workspaces", None)
+        # A newer setting left at its default is not written, so the file still loads
+        # in a version that does not know the key (config sections refuse unknown keys).
+        for section, key in _OMIT_WHEN_NONE:
+            if snapshot.get(section, {}).get(key, 0) is None:
+                snapshot[section].pop(key)
         text = (
-            "# Managed by the Matheran settings UI. Secrets live in .env, not here.\n"
+            "# Managed by the Saidarshan settings UI. Secrets live in .env, not here.\n"
             + yaml.safe_dump(snapshot, sort_keys=False, default_flow_style=False)
         )
         fd, tmp = tempfile.mkstemp(dir=str(self.config_path.parent or "."), suffix=".tmp")
@@ -419,3 +509,8 @@ class SettingsManager:
 
 def _dump(obj) -> dict:
     return {f: getattr(obj, f) for f in obj.__dataclass_fields__}
+
+
+# (section, key) pairs added after config.yaml files were already in use; see
+# persist_config.
+_OMIT_WHEN_NONE: tuple[tuple[str, str], ...] = (("strategy", "exit_timeframe_minutes"),)

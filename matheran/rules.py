@@ -63,7 +63,7 @@ OPERANDS: dict[str, dict] = {
     "open": {"label": "Open", "kind": "price", "params": ()},
     "high": {"label": "High", "kind": "price", "params": ()},
     "low": {"label": "Low", "kind": "price", "params": ()},
-    "vwap": {"label": "Advanced VWAP (session)", "kind": "price", "params": ()},
+    "vwap": {"label": "VWAP (session)", "kind": "price", "params": ()},
     "ema": {"label": "EMA of close", "kind": "price",
             "params": (_int("period", "Period", 21, 1, 500),)},
     "sma": {"label": "SMA of close", "kind": "price",
@@ -318,7 +318,7 @@ def describe_operand(o: dict) -> str:
     if ind in {"close", "open", "high", "low"}:
         return OPERANDS[ind]["label"]
     if ind == "vwap":
-        return "Advanced VWAP"
+        return "VWAP"
     if ind == "ema":
         return f"EMA({o['period']})"
     if ind == "sma":

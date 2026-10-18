@@ -6,7 +6,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <script src="/static/ui-theme.js"></script>
-<title>Matheran trading console</title>
+<title>__SSH_TITLE__</title>
 <style>
   :root {
     --bg:#0f1216; --panel:#171c22; --panel2:#1c2229; --line:#2a323c; --text:#e6edf3;
@@ -17,11 +17,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
   a { color:var(--accent); }
 
-  header { position:sticky; top:0; z-index:20; background:#0f1216ee;
-    backdrop-filter:blur(6px); border-bottom:1px solid var(--line); padding:10px 16px; }
+  /* The shell (header.ssh, the view bar) is styled by /static/app-shell.css. Only the
+     dashboard's own pieces of it are here: it stays on screen while the page scrolls. */
+  #shellHead { position:sticky; top:0; z-index:30; }
+  #viewBar { position:sticky; top:var(--ssh-head-h, 52px); z-index:29; }
   .bar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:.01em; }
   .grow { margin-left:auto; }
+  .ssh-global .pill { font-size:11.5px; }
+  .ssh-global label.keyf { min-width:200px; }
+  .ssh-global label.keyf input { width:100%; }
+  .ssh-global .theme-picker { flex-direction:row; align-items:center; }
 
   .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px;
     border:1px solid var(--line); color:var(--muted); white-space:nowrap; }
@@ -30,15 +35,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .pill.on { background:#3a2c08; color:#f2cc60; border-color:#5c4408; }
   .pill.bad { background:#4a1218; color:#ffb3b3; border-color:#7d232b; }
 
-  nav[role=tablist] { display:flex; gap:4px; margin-top:10px; flex-wrap:wrap; }
-  nav button { background:transparent; border:1px solid transparent; border-bottom:2px solid transparent;
-    color:var(--muted); padding:7px 14px; border-radius:6px 6px 0 0; cursor:pointer; font:inherit; }
-  nav button:hover { color:var(--text); background:#1c2229; }
-  nav button[aria-selected=true] { color:var(--text); border-bottom-color:var(--accent); font-weight:600; }
-  nav button .dot { display:inline-block; width:7px; height:7px; border-radius:50%;
-    background:var(--warn); margin-left:6px; vertical-align:middle; }
-
   main { padding:16px; max-width:1560px; }
+  /* The view heading: workspace eyebrow, then the view. */
+  .vh { margin:2px 0 14px; }
+  .vh .eyebrow { margin:0 0 3px; font:500 11.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .vh h1 { margin:0; font-size:21px; line-height:1.25; letter-spacing:-.02em; font-weight:650; }
+  .vh .sub { margin:4px 0 0; }
+  .scope { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--muted);
+    border:1px dashed var(--line); border-radius:999px; padding:1px 9px; }
+  .ferr { display:block; color:#ffb3b3; font-size:12px; margin-top:2px; }
+  .ferr:empty { display:none; }
+  input[aria-invalid="true"], select[aria-invalid="true"] { border-color:var(--down) !important; }
+  button[aria-busy="true"]::after { content:" …"; }
+  dl.kv { margin:0; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); }
+  dl.kv div { display:flex; gap:6px; }
+  /* Empty and loading rows read from the left, like the rows they stand in for. */
+  tbody td[colspan] { text-align:left; }
+  dl.kv dt { color:var(--muted); }
+  dl.kv dd { margin:0; font-weight:600; }
+  .num, td, .kv { font-variant-numeric:tabular-nums; }
   section.panel { background:var(--panel); border:1px solid var(--line); border-radius:9px;
     padding:14px 16px; margin-bottom:16px; }
   h2 { font-size:13px; margin:0 0 4px; font-weight:650; text-transform:uppercase;
@@ -51,7 +67,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   th { color:var(--muted); font-weight:600; font-size:11.5px; text-transform:uppercase; }
   tbody tr:hover { background:var(--panel2); }
   tr.ready td { background:#12301c; }
-  .scroll { overflow-x:auto; }
+  /* Positioned, so screen-reader-only text inside a table scrolls with it instead of
+     widening the page. */
+  .scroll { overflow-x:auto; position:relative; }
 
   button { background:#21262d; color:var(--text); border:1px solid var(--line);
     border-radius:6px; padding:6px 13px; cursor:pointer; font:inherit; }
@@ -150,7 +168,29 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .ordbody .actions { display:flex; justify-content:flex-end; gap:8px; }
   .ordbody td, .ordbody th { padding:4px 6px; }
   .ordbody input.lim { width:104px; }
+  /* Stop and target stay level when one of them shows an error underneath. */
+  #ordLevels { align-items:flex-start; }
+  /* One field: as wide as the others, not the whole panel. */
+  #exitTfGrid { grid-template-columns:minmax(0, 340px); }
   td.rdy { font-weight:650; color:var(--up); }
+
+  /* A value and its unit (% or price) side by side: stop and target. */
+  .pair { display:flex; gap:4px; align-items:center; }
+  .pair input[type=number] { width:88px; }
+  .pair select { padding-left:6px; padding-right:6px; }
+
+  /* Option Scan: the conditions READY needs, each with its timeframe and periods. */
+  fieldset.conds { border:1px solid var(--line); border-radius:8px; padding:8px 12px 10px;
+    margin:12px 0 0; min-width:0; }
+  fieldset.conds legend { color:var(--muted); font-size:12px; padding:0 4px; }
+  fieldset.conds .sub { margin:0 0 8px; }
+  table.conds td { vertical-align:middle; white-space:normal; }
+  table.conds td:first-child { width:40px; }
+  table.conds .pp { display:inline-flex; align-items:center; gap:4px; font-size:12px;
+    color:var(--muted); margin-right:10px; }
+  table.conds input[type=number] { width:76px; padding:4px 6px; }
+  table.conds select { padding:4px 6px; }
+  th .offtag { font-weight:500; text-transform:none; margin-left:3px; }
 
   /* Scanner */
   #p-scanner h3 { font-size:13px; margin:14px 0 6px; font-weight:650; }
@@ -175,18 +215,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #scNotes:empty { display:none; }
 
   @media (max-width:760px) {
-    header { padding:6px 8px; }
-    header > .bar { flex-wrap:nowrap; overflow-x:auto; align-items:center; gap:8px;
-      scrollbar-width:thin; -webkit-overflow-scrolling:touch; }
-    header > .bar > * { flex:none; }
-    header > .bar > .grow { margin-left:0; }
-    header > .bar .row { flex-wrap:nowrap; width:auto; }
-    header > .bar label[for="key"] { min-width:190px !important; }
-    nav[role=tablist] { flex-wrap:nowrap; overflow-x:auto; margin-top:5px;
-      scrollbar-width:thin; -webkit-overflow-scrolling:touch; }
-    nav[role=tablist] > * { flex:none; }
-    nav[role=tablist] button, nav[role=tablist] a { min-height:44px; padding:10px 12px !important; }
+    /* On a phone the shell scrolls away with the page instead of covering it. */
+    #shellHead, #viewBar { position:static; }
+    .ssh-global label.keyf { min-width:190px; }
     main { width:100%; max-width:100%; min-width:0; padding:8px; }
+    input, select, textarea { font-size:16px; }
     section.panel { padding:11px 10px; margin-bottom:10px; }
     form.row, .row { max-width:100%; min-width:0; }
     label.f { min-width:0; max-width:100%; }
@@ -202,65 +235,73 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
 </style>
 <link rel="stylesheet" href="/static/ui-theme.css" />
+<!--SSH:HEAD-->
 </head>
 <body>
-<header>
-  <div class="bar">
-    <h1>Matheran</h1>
-    <span id="pMode" class="pill">…</span>
-    <span id="pBroker" class="pill">…</span>
-    <span id="pMarket" class="pill">…</span>
-    <span id="pAuth" class="pill">…</span>
-    <span id="pHalt" class="pill on" hidden>HALTED</span>
-    <label class="theme-picker" for="themeSelect">Theme
-      <select id="themeSelect" data-theme-select><option value="night">Night</option><option value="light">Light</option></select>
-    </label>
-    <div class="grow row" style="align-items:center">
-      <label class="f" for="key" style="min-width:230px"
+<a class="ssh-skip" href="#viewPanel">Skip to content</a>
+<header class="ssh" id="shellHead" aria-label="Saidarshan">
+  <div class="ssh-row">
+    <!--SSH:BRAND-->
+    <!--SSH:WSTABS-->
+    <div class="ssh-grow"></div>
+    <!-- One copy of every system-wide control, for all three workspaces. -->
+    <div class="ssh-global bar" role="group" aria-labelledby="globalScope">
+      <span id="globalScope" class="ssh-scope" title="These apply to all workspaces">All workspaces</span>
+      <span id="pMode" class="pill">…</span>
+      <span id="pBroker" class="pill">…</span>
+      <span id="pMarket" class="pill">…</span>
+      <span id="pAuth" class="pill">…</span>
+      <span id="pHalt" class="pill on" hidden>HALTED</span>
+      <label class="theme-picker" for="themeSelect">Theme
+        <select id="themeSelect" data-theme-select><option value="night">Night</option><option value="light">Light</option></select>
+      </label>
+      <label class="f keyf" for="key"
              title="This app's own password (MATHERAN_API_KEY in .env). Not a Dhan or Upstox credential.">
-        Password for this dashboard
+        Saidarshan dashboard password
         <input id="key" type="password" autocomplete="off"
                placeholder="MATHERAN_API_KEY from .env" />
       </label>
       <button id="btnKey" type="button" title="Store the key for this browser tab">Use</button>
-      <button id="btnHalt" type="button" class="danger">Halt</button>
-      <button id="btnResume" type="button" hidden>Resume</button>
+      <button id="btnHalt" type="button" class="danger"
+              title="Halt the engine: applies to all workspaces">Halt</button>
+      <button id="btnResume" type="button" hidden title="Resume the engine: applies to all workspaces">Resume</button>
+      <a id="sysLink" class="ssh-sys" href="/app/system"
+         title="Mode, broker, credentials and engine caps: applies to all workspaces">System</a>
     </div>
   </div>
-  <nav role="tablist" aria-label="Sections">
-    <button role="tab" id="tab-setup"    aria-controls="p-setup"    aria-selected="false">Setup</button>
-    <button role="tab" id="tab-trade"    aria-controls="p-trade"    aria-selected="true">Trade</button>
-    <button role="tab" id="tab-options"  aria-controls="p-options"  aria-selected="false">Options</button>
-    <button role="tab" id="tab-scanner"  aria-controls="p-scanner"  aria-selected="false">Scanner</button>
-    <button role="tab" id="tab-baskets"  aria-controls="p-baskets"  aria-selected="false">Baskets</button>
-    <button role="tab" id="tab-strategy" aria-controls="p-strategy" aria-selected="false">Strategy</button>
-    <button role="tab" id="tab-journal"  aria-controls="p-journal"  aria-selected="false">Journal</button>
-    <a href="/charts" style="margin-left:8px;align-self:center;color:var(--accent);
-       text-decoration:none;font-size:13px;padding:7px 12px">Charts ↗</a>
-    <a href="/chain" style="align-self:center;color:var(--accent);
-       text-decoration:none;font-size:13px;padding:7px 12px">Option chain ↗</a>
-  </nav>
 </header>
+<p id="sshLive" class="ssh-sr" role="status" aria-live="polite"></p>
 
-<main>
+<div id="wsPanel" class="ssh-wspanel" __SSH_WSPANEL_ATTRS__>
+<div id="viewBar" class="ssh-viewbar" __SSH_VIEWBAR_HIDDEN__><!--SSH:VIEWTABS--></div>
+<main id="main">
+ <div id="viewPanel" class="ssh-viewpanel" __SSH_VIEWPANEL_ATTRS__ tabindex="-1">
+  <div class="vh">
+    <p class="eyebrow" id="viewEyebrow"></p>
+    <h1 id="viewTitle">Saidarshan</h1>
+  </div>
   <div id="msg" role="status" aria-live="polite"></div>
   <div id="dirty" class="warnbox" hidden>
     <strong>Credentials or mode changed.</strong>
-    <span>Apply them to load the new broker into the running engine.</span>
+    <span>Apply them to load the new broker into the running engine. Applies to all workspaces.</span>
     <button type="button" id="btnApply" class="go">Apply now</button>
   </div>
   <div id="dataErr" class="errbox" hidden>
     <strong>No market data.</strong>
     <span id="dataErrMsg"></span>
-    <p style="margin:8px 0 0">Nothing can be computed without candles — Advanced VWAP, RSI,
+    <p style="margin:8px 0 0">Nothing can be computed without candles — VWAP, RSI,
       Supertrend and ADX all need them, so no signal will ever fire. Either subscribe to
       Dhan Data APIs (₹499 + taxes per month, under DhanHQ Trading APIs on web.dhan.co),
-      or switch the broker to <strong>Paper only (synthetic data)</strong> on the Setup tab
-      to keep working meanwhile.</p>
+      or switch the broker to <strong>Paper only (synthetic data)</strong> in
+      <a href="/app/system">System settings</a> to keep working meanwhile.</p>
   </div>
 
-  <!-- ============================== SETUP ============================== -->
-  <div role="tabpanel" id="p-setup" aria-labelledby="tab-setup" hidden>
+  <!-- ============================== SYSTEM ============================== -->
+  <!-- Global: one broker, one mode, one set of credentials and caps for all workspaces. -->
+  <div id="p-system" class="vpanel" hidden>
+    <p class="sub"><span class="scope">Applies to all workspaces</span> Connection, credentials,
+      the engine's caps and session times, and records no workspace owns. Halt / Resume is in
+      the header.</p>
     <section class="panel">
       <h2>Connection</h2>
       <p class="sub">Which broker the engine uses, and whether orders are real.
@@ -301,40 +342,105 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div id="creds"><p class="mut">Loading…</p></div>
       <div class="row" style="margin-top:6px">
         <button type="button" id="btnSaveCreds" class="go">Save credentials</button>
-        <button type="button" id="btnGenKey">Generate console API key</button>
+        <button type="button" id="btnGenKey">Generate dashboard password</button>
       </div>
+    </section>
+
+    <section class="panel" aria-labelledby="engHead">
+      <h2 id="engHead">Engine, caps and session</h2>
+      <p class="sub"><span class="scope">Applies to all workspaces</span> One engine trades for
+        all three workspaces, so its caps and session times are shared. Saved to
+        <code>config.yaml</code>.</p>
+      <div class="grid" id="engGrid"></div>
+      <div class="row" style="margin-top:14px">
+        <button type="button" id="btnSaveEngine" class="go">Save engine settings</button>
+        <button type="button" id="btnReloadEngine">Discard changes</button>
+        <span id="engState" class="mut" style="font-size:12.5px" role="status"></span>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="legacyHead">
+      <h2 id="legacyHead">Unclassified records <span id="legacyN" class="mut"></span></h2>
+      <p class="sub">Records from before workspaces that no rule can honestly place in one
+        workspace (a future, or a watch that bought and sold an option both ways). They are
+        shown here only, never in two journals. IDs and P&amp;L are unchanged.</p>
+      <div id="legacyBox"><p class="mut">Loading…</p></div>
+    </section>
+  </div>
+
+  <!-- ===================== WORKSPACE SETUP (per workspace) ===================== -->
+  <div id="p-wssetup" class="vpanel" hidden>
+    <section class="panel" aria-labelledby="wsSetupHead">
+      <h2 id="wsSetupHead">Defaults for this workspace</h2>
+      <p class="sub" id="wsSetupSub">New watches, scans and orders in this workspace start from
+        these. Other workspaces keep their own.</p>
+      <form id="wsSetupForm" novalidate>
+        <div class="grid" id="wsSetupGrid"><p class="mut">Loading…</p></div>
+        <div class="row" style="margin-top:14px">
+          <button type="submit" id="wsSetupSave" class="go">Save defaults</button>
+          <button type="button" id="wsSetupDiscard">Discard changes</button>
+          <button type="button" id="wsSetupReset"
+                  title="Stop saving this workspace's own defaults and follow the global settings">Use global defaults</button>
+          <span id="wsSetupState" class="mut" style="font-size:12.5px" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+    </section>
+    <section class="panel" aria-labelledby="wsGlobalHead">
+      <h2 id="wsGlobalHead">Applies to all workspaces</h2>
+      <p class="sub">Shown here read-only. There is one copy of each, changed in
+        <a href="/app/system">System settings</a>.</p>
+      <dl class="kv" id="wsGlobal"></dl>
     </section>
   </div>
 
   <!-- ============================== TRADE ============================== -->
-  <div role="tabpanel" id="p-trade" aria-labelledby="tab-trade">
+  <!-- Stock Intraday and Option Buyer: each shows only its own approvals and watches. -->
+  <div id="p-trade" class="vpanel" hidden>
     <section class="panel">
       <h2>Approvals waiting <span id="apprN" class="mut"></span></h2>
       <p class="sub">No position is ever opened without you pressing Approve here.</p>
       <div id="appr" aria-live="polite"><p class="mut">Nothing waiting.</p></div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="optTradeHint" hidden>
+      <h2>Add a contract</h2>
+      <p class="sub" style="margin:0">Pick contracts on <a href="/app/option-buyer/option-scan">Option
+        Scan</a>: Watch waits for the entry signal and your approval, Buy enters now.</p>
+    </section>
+
+    <section class="panel" id="addStock">
       <h2>Add a stock to watch</h2>
       <form class="row" id="addForm">
-        <label class="f" for="sym">Symbol<input id="sym" required placeholder="RELIANCE" size="13" /></label>
+        <label class="f" for="sym">Symbol<input id="sym" required placeholder="RELIANCE" size="13"
+          autocomplete="off" spellcheck="false" aria-describedby="symErr" /><span class="ferr" id="symErr"></span></label>
         <label class="f" for="exch">Exchange
           <select id="exch"><option>NSE</option><option>BSE</option></select></label>
         <label class="f" for="dir">Direction
           <select id="dir">
             <option value="LONG">LONG — buy, then sell</option>
             <option value="SHORT">SHORT — sell, then buy back</option>
-            <option value="BOTH">BOTH — buy above Advanced VWAP, sell below</option>
+            <option value="BOTH">BOTH — buy above VWAP, sell below</option>
           </select>
         </label>
-        <label class="f" for="qty">Quantity<input id="qty" type="number" min="1" step="1" value="1" required /></label>
+        <label class="f" for="qty">Quantity<input id="qty" type="number" min="1" step="1" value="1" required
+          inputmode="numeric" aria-describedby="qtyErr" /><span class="ferr" id="qtyErr"></span></label>
         <label class="f" for="tf">Timeframe
           <select id="tf" data-tf="5"></select></label>
         <label class="f" for="tradeCandle">Candle type
           <select id="tradeCandle"><option value="normal">Normal candle</option>
             <option value="heikin_ashi">Heikin Ashi</option></select></label>
-        <label class="f" for="sl">Stop %<input id="sl" type="number" min="0.1" max="50" step="0.1" value="3" /></label>
-        <label class="f" for="tp">Target %<input id="tp" type="number" min="0.1" step="0.1" placeholder="none" /></label>
+        <label class="f" for="sl">Stop loss
+          <span class="pair"><input id="sl" type="number" min="0.05" step="0.05" value="3" inputmode="decimal"
+              aria-describedby="slErr" />
+            <select id="slUnit" aria-label="Stop loss unit"><option value="pct">%</option>
+              <option value="price">price</option></select></span>
+          <span class="ferr" id="slErr"></span></label>
+        <label class="f" for="tp">Target
+          <span class="pair"><input id="tp" type="number" min="0.05" step="0.05" placeholder="none" inputmode="decimal"
+              aria-describedby="tpErr" />
+            <select id="tpUnit" aria-label="Target unit"><option value="pct">%</option>
+              <option value="price">price</option></select></span>
+          <span class="ferr" id="tpErr"></span></label>
         <label class="f" for="prod" title="Intraday is squared off at the square-off time; delivery (CNC) is carried until its exits fire">Product
           <select id="prod"><option value="">default</option><option value="INTRADAY">Intraday</option>
             <option value="DELIVERY">Delivery (CNC)</option></select></label>
@@ -343,17 +449,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <option value="both">SL / target + exit conditions</option>
             <option value="sl_target">SL / target only</option>
             <option value="strategy">Exit conditions only (no stop)</option></select></label>
-        <button type="submit" class="go">Watch</button>
+        <button type="submit" class="go" id="btnWatch">Watch</button>
       </form>
     </section>
 
     <section class="panel">
-      <h2>Watches</h2>
+      <h2>Watches <span id="watchN" class="mut"></span></h2>
       <div class="scroll">
         <table>
           <thead><tr>
             <th class="l">Instrument</th><th class="l">Dir</th><th class="l">Kind</th><th>TF</th><th>Candle</th><th>Qty</th>
-            <th class="l">State</th><th>LTP</th><th>Advanced VWAP</th><th>RSI</th><th>EMA(RSI,21)</th>
+            <th class="l">State</th><th>LTP</th><th title="Session VWAP: the line every price-versus-VWAP condition reads">VWAP</th><th>RSI</th><th>EMA(RSI,21)</th>
             <th>Supertrend</th><th>ADX</th>
             <th title="Every entry condition satisfied on the last closed candle; hover for each condition">Ready</th>
             <th>Entry</th><th>Stop</th><th>P&amp;L</th>
@@ -365,62 +471,115 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </section>
   </div>
 
-  <!-- ============================= OPTIONS ============================= -->
-  <div role="tabpanel" id="p-options" aria-labelledby="tab-options" hidden>
-    <div role="tablist" aria-label="Option views" class="row"
-         style="align-items:center;margin:0 0 10px;gap:6px">
-      <button type="button" role="tab" id="opt-tab-scan" class="go"
-              aria-controls="opt-panel-scan" aria-selected="true">Option scan</button>
-      <button type="button" role="tab" id="opt-tab-straddle"
-              aria-controls="opt-panel-straddle" aria-selected="false" tabindex="-1">Straddle</button>
-    </div>
-
-    <div role="tabpanel" id="opt-panel-scan" aria-labelledby="opt-tab-scan">
+  <!-- ========================= OPTION SCAN (Option Buyer) ========================= -->
+  <div id="p-optscan" class="vpanel" hidden>
       <section class="panel">
         <h2>ATM and OTM scan</h2>
-        <p class="sub">Current price, Advanced VWAP, RSI(21), EMA(RSI,21), EMA(21), Supertrend(21, 0.618)
-          and ADX for the ATM strike plus OTM strikes on both sides. Rows highlighted green
-          meet every entry condition. For open interest, OI change and the 5-minute buildup on
-          every strike, open the <a href="/chain">full option chain ↗</a>.</p>
-        <form class="row" id="chainForm">
+        <p class="sub">Current price, session VWAP, RSI, EMA(RSI), EMA, Supertrend and ADX for the
+          ATM strike plus OTM strikes on both sides. Rows highlighted green, marked READY, meet
+          every condition ticked below; by default those are Option Buyer's strategy entry
+          conditions. For open interest, OI change and the 5-minute buildup on every strike, use
+          Option Seller's <a href="/app/option-seller/option-chain">Option Chain</a>.</p>
+        <form id="chainForm" novalidate>
+         <div class="row">
           <label class="f" for="und">Underlying
             <select id="und"><option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option>
               <option>MIDCPNIFTY</option><option>SENSEX</option></select></label>
           <label class="f" for="exp">Expiry<select id="exp"><option value="">nearest</option></select></label>
           <label class="f" for="otm">OTM count<input id="otm" type="number" min="0" max="20" value="5" /></label>
-          <label class="f" for="otf">Timeframe
+          <label class="f" for="otf" title="The default timeframe for every condition below">Scan timeframe
             <select id="otf" data-tf="1"></select></label>
           <label class="f" for="optCandle">Candle type
             <select id="optCandle"><option value="normal">Normal candle</option>
               <option value="heikin_ashi">Heikin Ashi</option></select></label>
           <label class="f" for="ref">ATM from
             <select id="ref"><option value="index">index spot</option><option value="future">future</option></select></label>
-          <label class="f" for="amin">ADX min<input id="amin" type="number" min="0" step="1" value="20" /></label>
           <label class="f" for="lots">Lots to buy<input id="lots" type="number" min="1" step="1" value="1" /></label>
           <button type="submit" class="go" id="btnScan">Scan</button>
           <label class="inline" for="autoScan"><input type="checkbox" id="autoScan" /> Auto-refresh</label>
+         </div>
+         <fieldset class="conds" id="condBox" aria-describedby="condHelp">
+          <legend>Conditions for READY</legend>
+          <p class="sub" id="condHelp">A row is READY when every ticked condition holds on the last
+            closed candle of its own timeframe (AND). Unticked ones still show their values. Each
+            timeframe defaults to the scan timeframe, and the periods to Option Buyer's strategy.
+            They apply to this scan only: a Watch waits for the Strategy entry conditions.</p>
+          <div class="scroll">
+            <table class="conds">
+              <caption class="sr">Scan conditions</caption>
+              <thead><tr><th class="l" scope="col">Use</th><th class="l" scope="col">Condition</th>
+                <th class="l" scope="col">Timeframe</th><th class="l" scope="col">Parameters</th></tr></thead>
+              <tbody>
+                <tr><td class="l"><input type="checkbox" id="cOn-vwap" data-cond="vwap" checked /></td>
+                  <td class="l"><label for="cOn-vwap">Price above VWAP (session)</label></td>
+                  <td class="l"><select id="cTf-vwap" data-cond-tf="vwap" aria-label="Timeframe for price above VWAP"></select></td>
+                  <td class="l mut">no parameters</td></tr>
+                <tr><td class="l"><input type="checkbox" id="cOn-rsi" data-cond="rsi" checked /></td>
+                  <td class="l"><label for="cOn-rsi">RSI above EMA(RSI)</label></td>
+                  <td class="l"><select id="cTf-rsi" data-cond-tf="rsi" aria-label="Timeframe for RSI above EMA(RSI)"></select></td>
+                  <td class="l"><label class="pp" for="cP-rsi_period">RSI period
+                      <input id="cP-rsi_period" data-cond-p="rsi_period" data-row="rsi" type="number" min="2" max="200" step="1" inputmode="numeric" aria-describedby="cErr-rsi" /></label>
+                    <label class="pp" for="cP-rsi_signal_period">EMA(RSI) period
+                      <input id="cP-rsi_signal_period" data-cond-p="rsi_signal_period" data-row="rsi" type="number" min="1" max="200" step="1" inputmode="numeric" aria-describedby="cErr-rsi" /></label>
+                    <span class="ferr" id="cErr-rsi"></span></td></tr>
+                <tr><td class="l"><input type="checkbox" id="cOn-ema" data-cond="ema" /></td>
+                  <td class="l"><label for="cOn-ema">Price above EMA</label></td>
+                  <td class="l"><select id="cTf-ema" data-cond-tf="ema" aria-label="Timeframe for price above EMA"></select></td>
+                  <td class="l"><label class="pp" for="cP-ema_period">EMA period
+                      <input id="cP-ema_period" data-cond-p="ema_period" data-row="ema" type="number" min="1" max="500" step="1" inputmode="numeric" aria-describedby="cErr-ema" /></label>
+                    <span class="ferr" id="cErr-ema"></span></td></tr>
+                <tr><td class="l"><input type="checkbox" id="cOn-supertrend" data-cond="supertrend" checked /></td>
+                  <td class="l"><label for="cOn-supertrend">Price above Supertrend</label></td>
+                  <td class="l"><select id="cTf-supertrend" data-cond-tf="supertrend" aria-label="Timeframe for price above Supertrend"></select></td>
+                  <td class="l"><label class="pp" for="cP-st_period">ATR period
+                      <input id="cP-st_period" data-cond-p="st_period" data-row="supertrend" type="number" min="1" max="200" step="1" inputmode="numeric" aria-describedby="cErr-supertrend" /></label>
+                    <label class="pp" for="cP-st_factor">Factor
+                      <input id="cP-st_factor" data-cond-p="st_factor" data-row="supertrend" type="number" min="0.01" max="20" step="0.001" inputmode="decimal" aria-describedby="cErr-supertrend" /></label>
+                    <span class="ferr" id="cErr-supertrend"></span></td></tr>
+                <tr><td class="l"><input type="checkbox" id="cOn-adx" data-cond="adx" checked /></td>
+                  <td class="l"><label for="cOn-adx">ADX above the minimum</label></td>
+                  <td class="l"><select id="cTf-adx" data-cond-tf="adx" aria-label="Timeframe for ADX above the minimum"></select></td>
+                  <td class="l"><label class="pp" for="cP-adx_period">ADX period
+                      <input id="cP-adx_period" data-cond-p="adx_period" data-row="adx" type="number" min="2" max="100" step="1" inputmode="numeric" aria-describedby="cErr-adx" /></label>
+                    <label class="pp" for="amin">Minimum
+                      <input id="amin" data-row="adx" type="number" min="0" max="100" step="0.5" value="20" inputmode="decimal" aria-describedby="cErr-adx" /></label>
+                    <span class="ferr" id="cErr-adx"></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="row" style="margin-top:8px;align-items:center">
+            <button type="button" id="condReset"
+              title="VWAP, RSI vs EMA(RSI), Supertrend and ADX on the scan timeframe, with Option Buyer's periods">Use Option Buyer's strategy</button>
+            <span class="ferr" id="condErr" role="alert"></span>
+          </div>
+         </fieldset>
         </form>
         <p id="chainMeta" class="sub" style="margin:11px 0 0"></p>
+        <p id="condNote" class="sub" hidden style="margin:4px 0 0"><span class="tagb">custom</span>
+          READY uses the ticked conditions above, not the Strategy entry gate. A Watch from this
+          table waits for Option Buyer's Strategy entry conditions.</p>
         <div class="scroll" style="margin-top:6px">
           <table>
             <thead><tr>
               <th class="l">Contract</th><th class="l">Type</th><th>Strike</th>
-              <th>LTP</th><th>Advanced VWAP</th><th>&gt;Advanced VWAP</th><th>RSI(21)</th><th>EMA(RSI,21)</th>
-              <th>EMA(21)</th><th>Supertrend</th><th>ADX</th><th>Ready</th>
+              <th>LTP</th><th id="hVwap">VWAP</th><th id="hAbove">&gt;VWAP</th><th id="hRsi">RSI(21)</th>
+              <th id="hRsiEma">EMA(RSI,21)</th><th id="hEma">EMA(21)</th><th id="hSt">Supertrend</th>
+              <th id="hAdx">ADX</th><th>Ready</th>
               <th class="l">Blocking condition</th><th>Actions</th>
             </tr></thead>
             <tbody id="chain"><tr><td colspan="14" class="mut">Press Scan.</td></tr></tbody>
           </table>
         </div>
       </section>
-    </div>
+  </div>
 
-    <div role="tabpanel" id="opt-panel-straddle" aria-labelledby="opt-tab-straddle" hidden>
+  <!-- ======================== STRADDLE SCAN (Option Seller) ======================== -->
+  <div id="p-straddle" class="vpanel" hidden>
       <section class="panel">
         <h2>Straddle monitor</h2>
         <p class="sub">CE + PE premium for ATM and seven listed strikes on either side (15 rows).
           Change is from the previous session's combined close. Above / below compares the displayed
-          straddle price with Advanced VWAP and EMA(21) from the latest closed combined candle; trend uses
+          straddle price with session VWAP and EMA(21) from the latest closed combined candle; trend uses
           Supertrend(21, 0.618). Direct broker quotes are used when available; paper mode may use clearly
           labelled reference prices for simulated execution only.</p>
         <form class="row" id="straddleForm">
@@ -444,19 +603,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <thead><tr>
               <th class="l">Strike</th><th>Straddle price</th><th>Change</th><th>Change %</th>
               <th>Close</th><th>Open</th><th>High</th><th>Low</th>
-              <th>Advanced VWAP</th><th>Supertrend</th><th>EMA(21)</th><th>Status</th><th>Actions</th>
+              <th>VWAP</th><th>Supertrend</th><th>EMA(21)</th><th>Status</th><th>Actions</th>
             </tr></thead>
             <tbody id="straddleRows"><tr><td colspan="13" class="mut">Press Scan straddles.</td></tr></tbody>
           </table>
         </div>
       </section>
-    </div>
   </div>
 
   <!-- ============================= SCANNER ============================= -->
   <!-- Scanner controls carry their own ids and data-sc-* attributes only: never
-       data-sec / data-key, which the Strategy tab's Save collects page-wide. -->
-  <div role="tabpanel" id="p-scanner" aria-labelledby="tab-scanner" hidden>
+       data-sec / data-key, which the Strategy and System saves collect in their panels. -->
+  <div id="p-scanner" class="vpanel" hidden>
     <section class="panel" aria-labelledby="scCondHead">
       <h2 id="scCondHead">Conditions</h2>
       <p class="sub">A live BUY / SELL screener. Scanning itself is read-only and never places an
@@ -581,14 +739,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </section>
   </div>
 
-  <!-- ============================= BASKETS ============================= -->
-  <div role="tabpanel" id="p-baskets" aria-labelledby="tab-baskets" hidden>
+  <!-- ======================== BASKET (Option Seller) ======================== -->
+  <div id="p-baskets" class="vpanel" hidden>
     <section class="panel">
       <h2>New basket</h2>
       <p class="sub">A basket groups buy and sell legs for a spread, straddle or pair trade.
         Broker legs are submitted sequentially, not atomically. Each leg becomes a watch with its
         own stop, so every protection still applies. You can also build one from the
-        <a href="/chain">option chain ↗</a> with its B / S buttons.</p>
+        <a href="/app/option-seller/option-chain">Option Chain</a> with its B / S buttons.</p>
       <div class="row">
         <label class="f" for="bkName">Name
           <input id="bkName" maxlength="60" placeholder="e.g. bull call spread" /></label>
@@ -629,22 +787,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         difference of the leg prices in points, as the basket chart draws it.
         <strong>Exit all</strong> buys back sold legs first, then sells the bought ones.
         <strong>Watch legs</strong> lets each leg wait for its own entry signal instead.
-        <strong>Combo</strong> opens the underlying, the combined premium with Advanced VWAP, EMAs and
+        <strong>Combo</strong> opens the underlying, the combined premium with VWAP, EMAs and
         Supertrend, and the call and put legs on one 2 × 2 screen.
         <strong>Chart</strong> opens the combined basket value with indicators, beside its legs.</p>
       <div id="bkList" aria-live="polite"><p class="mut">No baskets yet.</p></div>
     </section>
   </div>
 
-  <!-- ============================ STRATEGY ============================ -->
-  <div role="tabpanel" id="p-strategy" aria-labelledby="tab-strategy" hidden>
+  <!-- ===================== STRATEGY (per workspace) ===================== -->
+  <div id="p-strategy" class="vpanel" hidden>
+    <p class="sub" id="stratScope"></p>
     <section class="panel">
       <h2>Entry rules</h2>
-      <p class="sub">All of these must hold on the last closed candle: price above Advanced VWAP,
-        RSI above its 21-EMA, price above Supertrend, and ADX above the minimum for options.
-        A SHORT (sell) watch uses the mirror image: price below Advanced VWAP, RSI below its 21-EMA and
-        price below Supertrend; a BOTH watch takes whichever side lines up.
-        Saved to <code>config.yaml</code> and applied to the next evaluation immediately.</p>
+      <p class="sub">All of these must hold on the last closed candle of the entry timeframe:
+        price above the session VWAP, RSI above its 21-EMA, price above Supertrend, and ADX above
+        the minimum for options. A SHORT (sell) watch uses the mirror image: price below the session
+        VWAP, RSI below its 21-EMA and price below Supertrend; a BOTH watch takes whichever side
+        lines up. The entry timeframe is the default for new watches; each watch keeps the one it
+        was added with. Saved for this workspace only, and applied to its watches at the next
+        evaluation.</p>
       <div class="grid" id="entryGrid"></div>
     </section>
 
@@ -656,6 +817,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         OR; AND binds tighter than OR, as in Pine Script. A row checked
         <strong>on candle close</strong> only reads candles that closed after the position was
         opened; a <strong>live price</strong> row reads the forming candle at the current price.</p>
+      <div class="grid" id="exitTfGrid"></div>
+      <p class="sub" style="margin:6px 0 12px">The rows read the exit timeframe's candles: every
+        watch of this workspace and its open positions, from their next check. Orders placed
+        from a chart keep the chart's timeframe.</p>
       <div class="scroll">
         <table class="rules">
           <caption class="sr">Exit conditions</caption>
@@ -676,31 +841,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
       <div id="ruleText" class="rulebox" aria-live="polite"></div>
 
-      <h2 style="margin-top:18px">Stop, target and session</h2>
-      <p class="sub">Checked on the live price between candles.</p>
+      <h2 style="margin-top:18px">Stop and target</h2>
+      <p class="sub">Checked on the live price between candles. The square-off and no-new-entry
+        times are engine settings, in <a href="/app/system">System</a>.</p>
       <div class="grid" id="exitGrid"></div>
       <p class="sub" style="margin:12px 0 0" id="exitSummary"></p>
     </section>
 
     <section class="panel">
       <h2>Indicator periods</h2>
-      <p class="sub">These feed the entry conditions and the charts, so the two cannot
-        disagree. Exit conditions carry their own parameters, in the rows above.</p>
+      <p class="sub">These feed this workspace's entry conditions and its charts, so the two
+        cannot disagree. Exit conditions carry their own parameters, in the rows above.</p>
       <div class="grid" id="indGrid"></div>
-    </section>
-
-    <section class="panel">
-      <h2>Engine, caps and session</h2>
-      <div class="grid" id="engGrid"></div>
       <div class="row" style="margin-top:14px">
-        <button type="button" id="btnSaveStrat" class="go">Save settings</button>
+        <button type="button" id="btnSaveStrat" class="go">Save strategy</button>
         <button type="button" id="btnReloadStrat">Discard changes</button>
+        <button type="button" id="btnResetStrat"
+                title="Stop saving this workspace's own strategy and follow the global settings">Use global strategy</button>
+        <span id="stratState" class="mut" style="font-size:12.5px" role="status" aria-live="polite"></span>
       </div>
     </section>
   </div>
 
-  <!-- ============================= JOURNAL ============================= -->
-  <div role="tabpanel" id="p-journal" aria-labelledby="tab-journal" hidden>
+  <!-- ===================== JOURNAL (per workspace) ===================== -->
+  <div id="p-journal" class="vpanel" hidden>
     <section class="panel">
       <h2>Trades <span id="pnlSum" class="mut"></span></h2>
       <div class="scroll">
@@ -726,7 +890,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
     </section>
   </div>
+ </div>
 </main>
+</div>
 
 <dialog id="ord" class="ord" aria-labelledby="ordTitle">
   <form id="ordForm" class="ordbody" novalidate>
@@ -762,6 +928,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <option value="strategy">Exit conditions only (no stop)</option>
         </select></label>
     </div>
+    <div class="row" id="ordLevels" hidden>
+      <label class="f" for="ordSl">Stop loss
+        <span class="pair"><input id="ordSl" type="number" min="0" step="0.05" inputmode="decimal"
+            aria-describedby="ordSlErr" />
+          <select id="ordSlUnit" aria-label="Stop loss unit"><option value="pct">% of entry</option>
+            <option value="price">price</option></select></span>
+        <span class="ferr" id="ordSlErr"></span></label>
+      <label class="f" for="ordTp">Target
+        <span class="pair"><input id="ordTp" type="number" min="0" step="0.05" inputmode="decimal"
+            placeholder="none" aria-describedby="ordTpErr" />
+          <select id="ordTpUnit" aria-label="Target unit"><option value="pct">% of entry</option>
+            <option value="price">price</option></select></span>
+        <span class="ferr" id="ordTpErr"></span></label>
+    </div>
     <div class="hint" id="ordHint" aria-live="polite"></div>
     <p class="err" id="ordErr" role="alert"></p>
     <div class="actions">
@@ -774,19 +954,50 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
+const SHELL = window.SaidarshanShell;
 let KEY = sessionStorage.getItem("mthKey") || "";
-let TAB = "trade";
+let TAB = "";             // the dashboard view on screen: "scanner", "trade", ... or "system"
 let SETTINGS = null;
 let SCAN_TIMER = null;
 let STRADDLE_DATA = null;
 let STATUS_NOTE = false;   // the message box currently shows a status-poll message
 $("key").value = KEY;
 
+/* Three workspaces, one document. Each keeps its own drafts, cached lists and scroll
+   positions here; the engine, broker and safety controls are shared and global. */
+const WS_IDS = ["stock_intraday", "option_buyer", "option_seller"];
+let ACTIVE = { ws: null, view: null };   // the workspace and view on screen
+let NAV_GEN = 0;          // bumps on every change of view: answers for an older view are dropped
+let VIEW_ABORT = null;    // aborts the previous view's data requests (never an order)
+const WSDATA = {};        // ws -> /api/workspaces/<ws>: its saved strategy, risk, setup defaults
+const DRAFT = {};         // ws -> unsaved edits: { strategy, setup, rules }
+const CACHE = {};         // ws -> last lists drawn: { appr, watches, trades, positions }
+const SCROLL = {};        // "ws/view" -> scroll position, restored on return and on Back
+const draftOf = (ws) => DRAFT[ws] || (DRAFT[ws] = { strategy: null, setup: null, rules: null });
+const cacheOf = (ws) => CACHE[ws] || (CACHE[ws] = {});
+const wsLabel = (ws) => (SHELL && SHELL.workspaceLabel(ws)) || "this workspace";
+/* A path with ?workspace= for the workspace on screen (or the one given). */
+function wsq(path, ws) {
+  const id = ws || ACTIVE.ws;
+  if (!id) return path;
+  return path + (path.indexOf("?") >= 0 ? "&" : "?") + "workspace=" + encodeURIComponent(id);
+}
+/* Still the same view as when a request went out? Late answers are thrown away. */
+const current = (gen, ws) => gen === NAV_GEN && ws === ACTIVE.ws;
+const viewSignal = () => (VIEW_ABORT ? VIEW_ABORT.signal : undefined);
+
 /* ------------------------------------------------------------------ helpers */
 async function api(path, opts = {}) {
   const h = { "Content-Type": "application/json" };
   if (KEY) h["X-API-Key"] = KEY;
-  const res = await fetch(path, { headers: h, ...opts });
+  let res;
+  try {
+    res = await fetch(path, { headers: h, ...opts });
+  } catch (e) {
+    // A view's data request aborted by leaving the view: nobody is waiting for it.
+    if (e && e.name === "AbortError") return new Promise(() => {});
+    throw e;
+  }
   const text = await res.text();
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch (e) { body = { detail: text }; }
@@ -829,11 +1040,19 @@ function chartSymbolFor(inst) {
   return `eq:${exch}:${inst.symbol}`;
 }
 
-/* Open the chart grid preloaded with these instruments. */
-function openCharts(symbols, timeframe) {
+/* Open the workspace's own chart grid preloaded with these instruments, in a window of
+   that workspace, so its layout and drawings stay its own. */
+function openCharts(symbols, timeframe, ws) {
   const q = new URLSearchParams({ symbols: symbols.filter(Boolean).join(",") });
   if (timeframe) q.set("tf", timeframe);
-  window.open("/charts?" + q.toString(), "matheranCharts");
+  const id = ws || ACTIVE.ws;
+  if (!id) { window.open("/charts?" + q.toString(), "matheranCharts"); return; }
+  window.open(SHELL.href(id, "chart") + "?" + q.toString(), "saidarshan-chart-" + id);
+}
+/* Option Seller's combo screen, for a saved basket or unsaved legs. */
+function openCombo(params) {
+  window.open(SHELL.href("option_seller", "combo-chart") + "?" + new URLSearchParams(params).toString(),
+              "saidarshan-combo-option_seller");
 }
 const n = (v, d = 2) =>
   (v === null || v === undefined || v === "" || Number.isNaN(Number(v))) ? "—" : Number(v).toFixed(d);
@@ -862,25 +1081,150 @@ const isCash = (inst) => !!inst && /^(NSE|BSE)_EQ$/.test(inst.segment || "");
 let RISK = {};            // /api/status risk block: defaults for the order dialog
 let HAS_RULES = true;     // whether the Strategy tab has any exit conditions
 
-/* --------------------------------------------------------------------- tabs */
-const TABS = ["setup", "trade", "options", "scanner", "baskets", "strategy", "journal"];
-function showTab(name) {
-  TAB = name;
-  TABS.forEach((t) => {
-    const btn = $("tab-" + t), panel = $("p-" + t);
-    const on = t === name;
-    btn.setAttribute("aria-selected", on ? "true" : "false");
-    btn.tabIndex = on ? 0 : -1;
-    panel.hidden = !on;
-  });
-  location.hash = name;
-  if (name === "setup" || name === "strategy") loadSettings();
-  if (name === "journal") loadJournal();
-  if (name === "options") loadExpiries();
-  if (name === "scanner") loadScanner();
-  if (name === "trade") loadTrade();
-  if (name === "baskets") { ensureLegRows(); loadBaskets(); }
+/* --------------------------------------------------------------- navigation */
+/* The URL is the state: /app/<workspace>/<view>, or /app/system. Refresh, Back /
+   Forward and shared links all land on the same view. Chart, Option Chain and Combo
+   Chart are their own pages inside the same shell, so links to them simply navigate. */
+const VIEW_PANELS = {
+  setup: "p-wssetup", scanner: "p-scanner", strategy: "p-strategy", trade: "p-trade",
+  journal: "p-journal", "option-scan": "p-optscan", "straddle-scan": "p-straddle",
+  basket: "p-baskets",
+};
+const PANEL_IDS = ["p-system", ...new Set(Object.values(VIEW_PANELS))];
+const SLUG_WS = Object.fromEntries((SHELL ? SHELL.nav : []).map((w) => [w.slug, w.id]));
+const isPageView = (ws, view) => {
+  const w = (SHELL ? SHELL.nav : []).find((x) => x.id === ws);
+  const v = w && w.views.find((x) => x.id === view);
+  return !!(v && v.page);
+};
+
+function parseAppPath(pathname) {
+  const parts = String(pathname || "").replace(/\/+$/, "").split("/").filter(Boolean);
+  if (parts[0] !== "app") return null;
+  if (parts[1] === "system") return { system: true };
+  const ws = SLUG_WS[parts[1]] || null;
+  if (parts[1] && !ws) return null;
+  return { ws, view: parts[2] || null };
 }
+
+/* Fill in what the address leaves out: the workspace last used, and the view it was
+   left on. */
+function resolveTarget(t) {
+  if (!t) return null;
+  if (t.system) return { system: true, ws: null, view: null };
+  const ws = t.ws || SHELL.lastWorkspace();
+  const w = SHELL.nav.find((x) => x.id === ws);
+  if (!w) return null;
+  const view = t.view && w.views.some((v) => v.id === t.view) ? t.view : SHELL.lastView(ws);
+  return { system: false, ws, view };
+}
+const scrollKey = (ws, view) => (ws ? ws + "/" + view : "system");
+
+function anyDirty() {
+  return SC.dirty || WS_IDS.some((ws) => {
+    const d = DRAFT[ws];
+    return !!d && (!!d.strategy || !!d.setup || !!(d.rules && d.rules.dirty));
+  }) || ENG_DIRTY;
+}
+
+function leaveWorkspace(ws) {
+  // Timers belong to the workspace that started them.
+  if (ws === "stock_intraday" && SC.auto && SC.auto.armed) {
+    scDisarm("Auto-rescan turned off when you left Stock Intraday. Press Run to start it again.");
+  }
+  if (ws === "option_buyer" && SCAN_TIMER) { clearInterval(SCAN_TIMER); SCAN_TIMER = null; }
+  note("");
+}
+
+/* Show a view. how: "push" (a click), "replace" (first load, a redirect) or "pop"
+   (Back / Forward, where the browser already moved). */
+function showView(target, how) {
+  const t = resolveTarget(target);
+  if (!t) { location.replace("/app"); return; }
+  if (!t.system && isPageView(t.ws, t.view)) {
+    // The last view used in that workspace is one of the full pages.
+    const url = SHELL.href(t.ws, t.view);
+    if (how === "replace" || how === "pop") location.replace(url); else location.assign(url);
+    return;
+  }
+  const leaving = { ...ACTIVE };
+  if (TAB) SCROLL[scrollKey(leaving.ws, leaving.view)] = window.scrollY;
+  if (leaving.ws && leaving.ws !== t.ws) leaveWorkspace(leaving.ws);
+  if (leaving.ws === "option_buyer" && leaving.view === "option-scan" && t.view !== "option-scan" && SCAN_TIMER) {
+    clearInterval(SCAN_TIMER); SCAN_TIMER = null;
+  }
+  NAV_GEN += 1;
+  if (VIEW_ABORT) VIEW_ABORT.abort();
+  VIEW_ABORT = new AbortController();
+  ACTIVE = { ws: t.ws, view: t.view };
+  TAB = t.system ? "system" : t.view;
+
+  const url = t.system ? "/app/system" : SHELL.href(t.ws, t.view);
+  const keepQuery = how === "replace" ? location.search : "";
+  if (how === "push") history.pushState({ ws: t.ws, view: t.view }, "", url);
+  else if (how === "replace") history.replaceState({ ws: t.ws, view: t.view }, "", url + keepQuery);
+
+  const panelId = t.system ? "p-system" : VIEW_PANELS[t.view];
+  PANEL_IDS.forEach((id) => { $(id).hidden = id !== panelId; });
+  SHELL.select(t.ws, t.view);
+  scAutoUI();
+  const wsName = t.system ? "All workspaces" : wsLabel(t.ws);
+  const viewName = t.system ? "System settings" : SHELL.viewLabel(t.ws, t.view);
+  $("viewEyebrow").textContent = wsName;
+  $("viewTitle").textContent = viewName;
+  document.title = t.system ? "System settings · Saidarshan" : `${viewName} · ${wsName} · Saidarshan`;
+  if (how !== "replace") SHELL.announce(t.system ? "System settings" : `${wsName}, ${viewName}`);
+
+  enterView(t);
+  const y = SCROLL[scrollKey(t.ws, t.view)] || 0;
+  requestAnimationFrame(() => window.scrollTo(0, how === "push" && !y ? 0 : y));
+}
+
+function enterView(t) {
+  if (t.system) { loadSystem(); loadLegacy(); return; }
+  const ws = t.ws;
+  if (t.view === "setup") { renderSetup(ws); return; }
+  if (t.view === "strategy") { renderStrategy(ws); return; }
+  if (t.view === "trade") { prepareTrade(ws); loadTrade(); return; }
+  if (t.view === "journal") { renderJournalCache(ws); loadJournal(); return; }
+  if (t.view === "scanner") { loadScanner(); return; }
+  if (t.view === "option-scan") { prepareOptionScan(); return; }
+  if (t.view === "straddle-scan") { prepareStraddle(); return; }
+  if (t.view === "basket") { prepareBaskets(); ensureLegRows(); loadBaskets(); }
+}
+
+if (SHELL) {
+  // The two tab rows: a plain click on a dashboard view swaps it in place.
+  SHELL.onNavigate = (a) => {
+    if (a.dataset.wsNav === "ws") {
+      const ws = a.dataset.ws, view = SHELL.lastView(ws);
+      if (isPageView(ws, view)) return false;      // follow the link to the page
+      showView({ ws, view }, "push");
+      return true;
+    }
+    if (a.dataset.page) return false;
+    showView({ ws: a.dataset.ws, view: a.dataset.view }, "push");
+    return true;
+  };
+}
+// Any other link to a dashboard view (System, "use Option Scan", ...) also stays in
+// the page; modified clicks, new windows and the full pages are the browser's.
+document.addEventListener("click", (ev) => {
+  const a = ev.target && ev.target.closest ? ev.target.closest("a[href^='/app']") : null;
+  if (!a || a.dataset.wsNav || a.target || ev.defaultPrevented || ev.button !== 0 ||
+      ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+  const url = new URL(a.href, location.href);
+  const t = resolveTarget(parseAppPath(url.pathname));
+  if (!t || url.search || (!t.system && isPageView(t.ws, t.view))) return;
+  ev.preventDefault();
+  showView(t, "push");
+});
+window.addEventListener("popstate", () => showView(parseAppPath(location.pathname), "pop"));
+window.addEventListener("beforeunload", (ev) => {
+  if (!anyDirty()) return;
+  ev.preventDefault();
+  ev.returnValue = "";
+});
 
 /* Side wording. Exit reasons are stored with long-side names; a short left on the
    mirror-image condition, so the text is flipped for it. */
@@ -901,17 +1245,6 @@ function instName(inst) {
 function dirCell(dir) {
   return `<td class="l ${dir === "SHORT" ? "down" : "up"}">${esc(dir || "LONG")}</td>`;
 }
-TABS.forEach((t, i) => {
-  const btn = $("tab-" + t);
-  btn.onclick = () => showTab(t);
-  btn.onkeydown = (ev) => {
-    if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
-    ev.preventDefault();
-    const next = TABS[(i + (ev.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length];
-    showTab(next); $("tab-" + next).focus();
-  };
-});
-
 /* ------------------------------------------------------------- header / key */
 $("btnKey").onclick = () => {
   KEY = $("key").value.trim();
@@ -920,8 +1253,10 @@ $("btnKey").onclick = () => {
   refresh();
 };
 $("btnHalt").onclick = async () => {
-  if (!confirm("Halt the engine? No new signals or entries will be raised.")) return;
-  const sq = confirm("Also exit every open position at market right now?\n\nOK = exit all, Cancel = keep positions.");
+  if (!confirm("Halt the engine for ALL workspaces? No new signals or entries will be raised " +
+      "in Stock Intraday, Option Buyer or Option Seller.")) return;
+  const sq = confirm("Also exit every open position in every workspace at market right now?\n\n" +
+    "OK = exit all, Cancel = keep positions.");
   try { await api("/api/control/halt", { method:"POST", body: JSON.stringify({ square_off: sq, reason: "halted from console" }) });
     note(sq ? "Halted and squared off." : "Halted.", "ok"); } catch (e) { note(e.message); }
   refresh();
@@ -938,11 +1273,13 @@ async function applyBroker() {
     const r = await api("/api/settings/broker/apply", { method:"POST" });
     note("Broker applied: " + r.broker + " (" + r.mode + ", data: " + r.data_source + ").", "ok");
   } catch (e) { note(e.message); }
-  refresh(); loadSettings();
+  refresh(); loadSystem();
 }
 
-/* ------------------------------------------------------------------ setup */
-async function loadSettings() {
+/* ------------------------------------------------------------------ system */
+/* Global settings: one copy for every workspace (mode, broker, credentials, caps). */
+let ENG_DIRTY = false;    // the System page's engine fields were edited and not saved
+async function loadSystem() {
   let s;
   const localHost = ["127.0.0.1", "localhost", "::1"].includes(location.hostname);
   const settingsPath = localHost ? "/api/settings" : "/api/settings-view";
@@ -953,8 +1290,260 @@ async function loadSettings() {
   $("cfgBroker").value = s.config.broker.name;
   $("cfgData").value = s.config.broker.data_broker || "";
   renderCreds(s.credentials);
-  renderStrategyForm(s.config);
-  loadRules(s.exit_rules);
+  if (!ENG_DIRTY) renderEngineForm(s.config);
+  if (TAB === "setup" && ACTIVE.ws) renderGlobalSummary();
+}
+
+// The engine section is global. Everything else on the old Strategy tab is now each
+// workspace's own (see renderStrategy).
+const ENG_FIELDS = [
+  ["engine","poll_seconds","Poll interval (s)","num"],
+  ["engine","approval_ttl_seconds","Approval expires after (s)","num"],
+  ["engine","cooldown_seconds","Cooldown after exit (s)","num"],
+  ["engine","max_trades_per_day","Max trades per day per watch","num"],
+  ["engine","max_open_positions","Max concurrent positions (all workspaces)","num"],
+  ["engine","market_open","Market open (HH:MM)","text"],
+  ["engine","market_close","Market close (HH:MM)","text"],
+  ["engine","square_off_time","Square off intraday positions at","text"],
+  ["engine","no_new_entry_after","No new intraday entries after","text"],
+  ["engine","default_product","Default product, where a workspace sets none","select",[
+    ["INTRADAY", "Intraday (squared off)"], ["DELIVERY", "Delivery (carried: CNC / NRML)"]]],
+];
+function renderEngineForm(cfg) {
+  $("engGrid").innerHTML = ENG_FIELDS.map((f) => field(f, cfg)).join("");
+  $("engState").textContent = "";
+}
+$("engGrid").addEventListener("input", () => { ENG_DIRTY = true; $("engState").textContent = "unsaved changes"; });
+$("engGrid").addEventListener("change", () => { ENG_DIRTY = true; $("engState").textContent = "unsaved changes"; });
+$("btnReloadEngine").onclick = () => { ENG_DIRTY = false; loadSystem(); };
+$("btnSaveEngine").onclick = async () => {
+  const patch = { engine: {} };
+  $("p-system").querySelectorAll("[data-sec='engine']").forEach((el) => {
+    const raw = el.value.trim();
+    patch.engine[el.dataset.key] = (el.type === "number" || el.dataset.num)
+      ? (raw === "" ? null : Number(raw)) : raw;
+  });
+  const btn = $("btnSaveEngine");
+  btn.disabled = true; btn.setAttribute("aria-busy", "true");
+  try {
+    await api("/api/settings/config", { method: "PUT", body: JSON.stringify(patch) });
+    ENG_DIRTY = false;
+    note("Engine settings saved for all workspaces.", "ok");
+    loadSystem(); refresh();
+  } catch (e) { $("engState").textContent = e.message; note(e.message); }
+  btn.disabled = false; btn.removeAttribute("aria-busy");
+};
+
+/* Records from before workspaces that the assignment rule cannot place. */
+async function loadLegacy() {
+  const gen = NAV_GEN;
+  let w = [], t = [];
+  try { w = (await api("/api/watches?workspace=legacy", { signal: viewSignal() })).watches || []; } catch (e) {}
+  try { t = (await api("/api/trades?workspace=legacy&limit=500", { signal: viewSignal() })).trades || []; } catch (e) {}
+  if (gen !== NAV_GEN || TAB !== "system") return;
+  $("legacyN").textContent = w.length + t.length ? `(${w.length} watch${w.length === 1 ? "" : "es"}, ${t.length} trade${t.length === 1 ? "" : "s"})` : "";
+  if (!w.length && !t.length) {
+    $("legacyBox").innerHTML = '<p class="mut">None: every record belongs to a workspace.</p>';
+    return;
+  }
+  const wrows = w.map((x) => `<tr><td class="l">${esc(instName(x.instrument))}</td>
+      <td class="l">${esc(x.sides || x.direction)}</td><td class="l">${esc(x.state.replace(/_/g, " "))}</td>
+      <td>${x.position ? n(x.position.entry_price) : "—"}</td>
+      <td>${x.position ? pnlSpan(x.position.unrealised_pnl) : "—"}</td>
+      <td>${x.position
+        ? `<button type="button" class="sm danger" data-lexit="${esc(x.id)}">Exit</button>`
+        : `<button type="button" class="sm" data-ldel="${esc(x.id)}">Remove</button>`}</td></tr>`).join("");
+  const trows = t.slice().reverse().map((x) => `<tr><td class="l">${clock(x.exit_time)}</td>
+      <td class="l">${esc(instName(x.instrument))}</td>${dirCell(x.direction)}<td>${x.quantity}</td>
+      <td>${n(x.entry_price)}</td><td>${n(x.exit_price)}</td>
+      <td class="${x.pnl >= 0 ? "up" : "down"}">${x.pnl >= 0 ? "+" : ""}${n(x.pnl)}</td>
+      <td class="l mut">${esc(x.id)}</td></tr>`).join("");
+  $("legacyBox").innerHTML = (w.length ? `<h3>Watches and positions</h3><div class="scroll"><table>
+      <thead><tr><th class="l">Instrument</th><th class="l">Dir</th><th class="l">State</th><th>Entry</th>
+      <th>P&amp;L</th><th></th></tr></thead><tbody>${wrows}</tbody></table></div>` : "") +
+    (t.length ? `<h3>Trades</h3><div class="scroll"><table>
+      <thead><tr><th class="l">Exit time</th><th class="l">Instrument</th><th class="l">Dir</th><th>Qty</th>
+      <th>Entry</th><th>Exit</th><th>P&amp;L</th><th class="l">ID</th></tr></thead><tbody>${trows}</tbody></table></div>` : "");
+  $("legacyBox").querySelectorAll("[data-lexit]").forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm("Exit this position at market?")) return;
+      b.disabled = true;
+      try { await api("/api/watches/" + b.dataset.lexit + "/exit", { method: "POST" }); note("Exit order sent.", "ok"); }
+      catch (e) { note(e.message); }
+      loadLegacy();
+    };
+  });
+  $("legacyBox").querySelectorAll("[data-ldel]").forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm("Remove this watch? It holds no position.")) return;
+      try { await api("/api/watches/" + b.dataset.ldel, { method: "DELETE" }); } catch (e) { note(e.message); }
+      loadLegacy();
+    };
+  });
+}
+
+/* ------------------------------------------------------------- workspaces */
+async function loadWorkspaces() {
+  try {
+    const d = await api("/api/workspaces");
+    for (const w of d.workspaces || []) WSDATA[w.id] = w;
+    return true;
+  } catch (e) { note(e.message); return false; }
+}
+/* Data for a workspace, loading it once if it is not here yet. */
+async function needWorkspace(ws) {
+  if (WSDATA[ws]) return WSDATA[ws];
+  await loadWorkspaces();
+  return WSDATA[ws] || null;
+}
+
+/* --------------------------------------------------------- workspace setup */
+function setupValue(ws, key) {
+  const d = draftOf(ws).setup;
+  if (d && Object.prototype.hasOwnProperty.call(d, key)) return d[key];
+  const w = WSDATA[ws];
+  return w && w.defaults ? w.defaults[key] : null;
+}
+function setupFieldHtml(f, value) {
+  const id = "wsd-" + f.key;
+  const help = f.help ? `<span class="hint mut" id="${id}-hint">${esc(f.help)}</span>` : "";
+  const err = `<span class="ferr" id="${id}-err"></span>`;
+  const desc = `aria-describedby="${f.help ? id + "-hint " : ""}${id}-err"`;
+  if (f.kind === "choice") {
+    const label = (c) => {
+      if (c === "") return f.key === "exit_mode" ? "Strategy tab default" : "default";
+      if (f.key === "timeframe_minutes") return tfCode(c);
+      if (f.key === "exit_mode") return EXIT_TEXT[c] || c;
+      if (f.key === "candle_type") return c === "heikin_ashi" ? "Heikin Ashi" : "Normal candle";
+      return String(c);
+    };
+    return `<label class="f" for="${id}">${esc(f.label)}<select id="${id}" data-wsd="${esc(f.key)}" ${desc}>
+      ${f.choices.map((c) => `<option value="${esc(c)}" ${String(c) === String(value == null ? "" : value) ? "selected" : ""}>${esc(label(c))}</option>`).join("")}
+      </select>${help}${err}</label>`;
+  }
+  const isNum = f.kind === "int" || f.kind === "float";
+  const attrs = isNum
+    ? `type="number" inputmode="${f.kind === "int" ? "numeric" : "decimal"}" step="${f.kind === "int" ? 1 : "any"}"` +
+      (f.min != null ? ` min="${f.min}"` : "") + (f.max != null ? ` max="${f.max}"` : "")
+    : 'type="text" autocomplete="off" spellcheck="false"';
+  return `<label class="f" for="${id}">${esc(f.label)}<input id="${id}" ${attrs} data-wsd="${esc(f.key)}"
+    value="${esc(value == null ? "" : value)}" placeholder="${f.optional ? "none" : ""}" ${desc} />${help}${err}</label>`;
+}
+/* The field's own message, beside it, saying how to fix it. "" when it is fine. */
+function setupFieldProblem(f, raw) {
+  const text = String(raw == null ? "" : raw).trim();
+  if (f.kind === "choice") return "";
+  if (!text) return f.optional ? "" : `${f.label} is required.`;
+  if (f.kind === "text") {
+    return /^[A-Za-z0-9&-]{1,30}$/.test(text) ? "" : "Use a symbol such as NIFTY.";
+  }
+  const v = Number(text);
+  if (!Number.isFinite(v)) return "Enter a number.";
+  if (f.kind === "int" && !Number.isInteger(v)) return "Enter a whole number.";
+  if (f.min != null && v < f.min) return `Use ${f.min} or more.`;
+  if (f.max != null && v > f.max) return `Use ${f.max} or less.`;
+  return "";
+}
+async function renderSetup(ws) {
+  const gen = NAV_GEN;
+  $("wsSetupGrid").innerHTML = '<p class="mut">Loading…</p>';
+  const w = await needWorkspace(ws);
+  if (!current(gen, ws) || TAB !== "setup") return;
+  if (!w) { $("wsSetupGrid").innerHTML = '<p class="no2">Could not load this workspace.</p>'; return; }
+  $("wsSetupSub").innerHTML = `New watches, scans and orders in <strong>${esc(w.label)}</strong> start
+    from these. The other workspaces keep their own.`;
+  $("wsSetupGrid").innerHTML = (w.defaults_schema || [])
+    .map((f) => setupFieldHtml(f, setupValue(ws, f.key))).join("");
+  setupStateText(ws);
+  renderGlobalSummary();
+}
+function setupStateText(ws) {
+  const w = WSDATA[ws];
+  const dirty = !!draftOf(ws).setup;
+  $("wsSetupState").textContent = dirty ? "unsaved changes"
+    : w && w.customised && w.customised.defaults ? "saved for this workspace"
+    : "following the global defaults (not yet saved for this workspace)";
+}
+function renderGlobalSummary() {
+  const st = LAST_STATUS || {};
+  const r = st.risk || {};
+  const items = [
+    ["Mode", st.mode ? st.mode.toUpperCase() + (st.mode === "live" ? " — real orders" : " — simulated") : "…"],
+    ["Orders go to", st.broker || "…"],
+    ["Market data", st.data_source || st.broker || "…"],
+    ["Engine", st.halted ? "HALTED" : "running"],
+    ["Max concurrent positions", r.max_open_positions != null ? r.max_open_positions : "…"],
+    ["Max trades per day per watch", r.max_trades_per_day != null ? r.max_trades_per_day : "…"],
+    ["Intraday square-off", r.square_off_time || "…"],
+    ["No new intraday entries after", r.no_new_entry_after || "…"],
+  ];
+  $("wsGlobal").innerHTML = items.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("");
+}
+$("wsSetupGrid").addEventListener("input", (ev) => setupEdited(ev.target));
+$("wsSetupGrid").addEventListener("change", (ev) => setupEdited(ev.target));
+function setupEdited(el) {
+  const ws = ACTIVE.ws;
+  if (!ws || !el || !el.dataset || !el.dataset.wsd) return;
+  const d = draftOf(ws);
+  d.setup = d.setup || {};
+  d.setup[el.dataset.wsd] = el.value;
+  const f = ((WSDATA[ws] || {}).defaults_schema || []).find((x) => x.key === el.dataset.wsd);
+  const problem = f ? setupFieldProblem(f, el.value) : "";
+  el.setAttribute("aria-invalid", problem ? "true" : "false");
+  const err = $(el.id + "-err");
+  if (err) err.textContent = problem;
+  setupStateText(ws);
+}
+$("wsSetupForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const ws = ACTIVE.ws;
+  const w = WSDATA[ws];
+  if (!ws || !w) return;
+  const values = {};
+  let firstBad = null;
+  for (const f of w.defaults_schema || []) {
+    const el = $("wsd-" + f.key);
+    if (!el) continue;
+    const problem = setupFieldProblem(f, el.value);
+    el.setAttribute("aria-invalid", problem ? "true" : "false");
+    $("wsd-" + f.key + "-err").textContent = problem;
+    if (problem && !firstBad) firstBad = el;
+    values[f.key] = el.value === "" ? null : el.value;
+  }
+  if (firstBad) { firstBad.focus(); $("wsSetupState").textContent = "Fix the highlighted fields."; return; }
+  const btn = $("wsSetupSave");
+  btn.disabled = true; btn.setAttribute("aria-busy", "true");
+  try {
+    WSDATA[ws] = await api(`/api/settings/workspaces/${ws}`, { method: "PUT",
+      body: JSON.stringify({ defaults: values }) });
+    draftOf(ws).setup = null;
+    note(`${wsLabel(ws)} defaults saved. Other workspaces are unchanged.`, "ok");
+    if (current(NAV_GEN, ws) && TAB === "setup") renderSetup(ws);
+  } catch (e) { $("wsSetupState").textContent = e.message; note(e.message); }
+  btn.disabled = false; btn.removeAttribute("aria-busy");
+};
+$("wsSetupDiscard").onclick = () => {
+  const ws = ACTIVE.ws;
+  if (!ws) return;
+  draftOf(ws).setup = null;
+  renderSetup(ws);
+};
+$("wsSetupReset").onclick = async () => {
+  const ws = ACTIVE.ws;
+  if (!ws || !confirm(`Stop saving ${wsLabel(ws)}'s own defaults and follow the global settings?`)) return;
+  try {
+    WSDATA[ws] = await api(`/api/settings/workspaces/${ws}/reset`, { method: "POST",
+      body: JSON.stringify({ parts: ["defaults"] }) });
+    draftOf(ws).setup = null;
+    note(`${wsLabel(ws)} now follows the global defaults.`, "ok");
+    if (current(NAV_GEN, ws) && TAB === "setup") renderSetup(ws);
+  } catch (e) { note(e.message); }
+};
+/* A workspace's saved default for a form field, or the given fallback. */
+function wsDefault(ws, key, fallback) {
+  const w = WSDATA[ws];
+  const v = w && w.defaults ? w.defaults[key] : undefined;
+  return v === undefined || v === null || v === "" ? fallback : v;
 }
 
 function renderCreds(c) {
@@ -985,7 +1574,7 @@ function renderCreds(c) {
       if (!confirm("Remove " + k + " from .env?")) return;
       try {
         await api("/api/settings/credentials", { method:"PUT", body: JSON.stringify({ values: { [k]: null } }) });
-        note(k + " cleared.", "ok"); loadSettings(); refresh();
+        note(k + " cleared.", "ok"); loadSystem(); refresh();
       } catch (e) { note(e.message); }
     };
   });
@@ -1007,19 +1596,19 @@ $("btnSaveCreds").onclick = async () => {
       $("key").value = KEY;
     }
     document.querySelectorAll("[data-cred]").forEach((el) => { el.value = ""; });
-    loadSettings(); refresh();
+    loadSystem(); refresh();
   } catch (e) { note(e.message); }
 };
 
 $("btnGenKey").onclick = async () => {
-  if (!confirm("Generate a new console API key? The old one stops working immediately.")) return;
+  if (!confirm("Generate a new Saidarshan dashboard password? The old one stops working immediately.")) return;
   try {
     const r = await api("/api/settings/api-key/generate", { method:"POST" });
     KEY = r.api_key;
     sessionStorage.setItem("mthKey", KEY);
     $("key").value = KEY;
     note("New key generated and saved to .env: " + r.api_key + "  (copy it now, it is not shown again)", "ok");
-    loadSettings(); refresh();
+    loadSystem(); refresh();
   } catch (e) { note(e.message); }
 };
 
@@ -1033,8 +1622,8 @@ $("connForm").onsubmit = async (ev) => {
       mode,
       broker: { name: $("cfgBroker").value, data_broker: $("cfgData").value || null },
       confirm_live: mode === "live" }) });
-    note("Connection saved. Press Apply to engine to switch the running broker.", "ok");
-    loadSettings(); refresh();
+    note("Connection saved for all workspaces. Press Apply to engine to switch the running broker.", "ok");
+    loadSystem(); refresh();
   } catch (e) { note(e.message); }
 };
 
@@ -1055,13 +1644,18 @@ $("btnTest").onclick = async () => {
 
 /* --------------------------------------------------------------- strategy */
 const ENTRY_FIELDS = [
-  ["strategy","timeframe_minutes","Timeframe","select",TFS.map((t) => [t.minutes, t.label])],
+  ["strategy","timeframe_minutes","Entry timeframe","select",TFS.map((t) => [t.minutes, t.label])],
   ["strategy","entry_candle_type","Candle type","select",[
     ["normal", "Normal candle"], ["heikin_ashi", "Heikin Ashi"]]],
   ["strategy","entry_condition_mode","Entry trigger","select",["state","cross"]],
   ["strategy","adx_min","ADX minimum (options)","num",null,0.5],
   ["strategy","require_adx","Require ADX for equities too","bool"],
   ["risk","allow_manual_buy","Allow the manual Buy / Sell and basket Execute buttons (skip the signal)","bool"],
+];
+// The candles the exit condition rows read. Blank = each watch's own (entry) timeframe.
+const EXIT_TF_FIELDS = [
+  ["strategy","exit_timeframe_minutes","Exit timeframe","tfnull",
+   [["", "Same as entry (each watch's timeframe)"], ...TFS.map((t) => [t.minutes, t.label])]],
 ];
 // The indicator exits are the rule rows above; these are the price and clock exits.
 const EXIT_FIELDS = [
@@ -1072,14 +1666,10 @@ const EXIT_FIELDS = [
   ["risk","exit_mode","Close positions on","select",[
     ["both", "SL / target + exit conditions"], ["sl_target", "SL / target only"],
     ["strategy", "Exit conditions only (no stop)"]]],
-  ["engine","default_product","Default product","select",[
-    ["INTRADAY", "Intraday (squared off)"], ["DELIVERY", "Delivery (carried: CNC / NRML)"]]],
   ["risk","trail_profit_trigger_pct","Trailing profit: start after % profit (blank = off)","num",null,0.1],
   ["risk","trail_profit_value","Trailing profit: trail by","num",null,0.05],
   ["risk","trail_profit_unit","Trailing profit: trail by unit","select",[
     ["pct", "% of the best price"], ["pts", "points"]]],
-  ["engine","square_off_time","Square off intraday positions at","text"],
-  ["engine","no_new_entry_after","No new intraday entries after","text"],
 ];
 const IND_FIELDS = [
   ["strategy","rsi_period","RSI period","num"],
@@ -1090,15 +1680,6 @@ const IND_FIELDS = [
   ["strategy","price_ema_period","Price EMA period","num"],
   ["strategy","adx_period","ADX period","num"],
 ];
-const ENG_FIELDS = [
-  ["engine","poll_seconds","Poll interval (s)","num"],
-  ["engine","approval_ttl_seconds","Approval expires after (s)","num"],
-  ["engine","cooldown_seconds","Cooldown after exit (s)","num"],
-  ["engine","max_trades_per_day","Max trades per day per watch","num"],
-  ["engine","max_open_positions","Max concurrent positions","num"],
-  ["engine","market_open","Market open (HH:MM)","text"],
-  ["engine","market_close","Market close (HH:MM)","text"],
-];
 function field(spec, cfg) {
   const [section, key, label, kind, choices, step] = spec;
   const value = (cfg[section] || {})[key];
@@ -1106,6 +1687,14 @@ function field(spec, cfg) {
   if (kind === "bool") {
     return `<label class="inline" for="${id}"><input type="checkbox" id="${id}"
       data-sec="${section}" data-key="${key}" ${value ? "checked" : ""} /> ${esc(label)}</label>`;
+  }
+  if (kind === "tfnull") {
+    // A timeframe that may be blank (null): sent back as a number, or null for "".
+    const cur = value === null || value === undefined ? "" : String(value);
+    return `<label class="f" for="${id}">${esc(label)}<select id="${id}" data-sec="${section}"
+      data-key="${key}" data-num="1">
+      ${choices.map(([v, text]) => `<option value="${esc(v)}" ${String(v) === cur ? "selected" : ""}>${esc(text)}</option>`).join("")}
+    </select></label>`;
   }
   if (kind === "select") {
     // A select's value is always text; numeric choices are marked so Save sends
@@ -1126,16 +1715,22 @@ function field(spec, cfg) {
 }
 function renderStrategyForm(cfg) {
   $("entryGrid").innerHTML = ENTRY_FIELDS.map((f) => field(f, cfg)).join("");
+  $("exitTfGrid").innerHTML = EXIT_TF_FIELDS.map((f) => field(f, cfg)).join("");
   $("exitGrid").innerHTML = EXIT_FIELDS.map((f) => field(f, cfg)).join("");
   $("indGrid").innerHTML = IND_FIELDS.map((f) => field(f, cfg)).join("");
-  $("engGrid").innerHTML = ENG_FIELDS.map((f) => field(f, cfg)).join("");
-
+  strategySummary(cfg);
+}
+function strategySummary(cfg) {
   // Spell out in words what will actually close a position, so the settings above
   // cannot be misread.
   const r = cfg.risk;
   const mode = r.exit_mode || "both";
   const parts = [];
-  if (mode !== "sl_target") parts.push("the exit conditions above");
+  const exitTf = Number((cfg.strategy || {}).exit_timeframe_minutes) || 0;
+  if (mode !== "sl_target") {
+    parts.push("the exit conditions above, on " +
+      (exitTf ? `${tfCode(exitTf)} candles` : "each watch's own timeframe"));
+  }
   if (mode !== "strategy") {
     parts.push(`a ${r.stop_loss_pct}% stop on capital deployed`);
     if (r.target_pct) parts.push(`a ${r.target_pct}% target`);
@@ -1145,7 +1740,7 @@ function renderStrategyForm(cfg) {
         `the best price ${r.trail_profit_value}${r.trail_profit_unit === "pts" ? " points" : "%"} behind`);
     }
   }
-  parts.push(`for intraday positions, square-off at ${cfg.engine.square_off_time}`);
+  parts.push(`for intraday positions, square-off at ${(cfg.engine || {}).square_off_time || RISK.square_off_time || "15:15"}`);
   $("exitSummary").textContent = "By default a position is closed by whichever comes first: " +
     parts.join("; ") + "." + (mode === "strategy"
       ? " Exit conditions only means no stop loss at all, so a trade can run against you until a condition fires."
@@ -1155,12 +1750,67 @@ function renderStrategyForm(cfg) {
     "are carried overnight and never squared off.";
 }
 
+/* The active workspace's Strategy view: its saved strategy and risk with this tab's
+   unsaved edits on top. Each workspace keeps its own draft, so switching workspace
+   mid-edit loses nothing and shows nothing of the other's. */
+function strategyCfg(ws) {
+  const w = WSDATA[ws];
+  const cfg = { strategy: { ...w.strategy }, risk: { ...w.risk }, engine: {} };
+  const d = draftOf(ws).strategy || {};
+  for (const [k, v] of Object.entries(d)) {
+    const [sec, key] = k.split(".");
+    if (cfg[sec]) cfg[sec][key] = v;
+  }
+  return cfg;
+}
+async function renderStrategy(ws) {
+  const gen = NAV_GEN;
+  const w = await needWorkspace(ws);
+  if (!current(gen, ws) || TAB !== "strategy") return;
+  if (!w) { $("stratScope").textContent = "Could not load this workspace's strategy."; return; }
+  renderStrategyForm(strategyCfg(ws));
+  RULE_CAT = w.exit_rules.catalog;
+  const d = draftOf(ws);
+  if (!d.rules) {
+    d.rules = { rows: clone(w.exit_rules.rules || []), dirty: false, reset: false };
+  }
+  renderRules();
+  if (d.rules.dirty) previewRules();
+  else showRuleText(w.exit_rules, "");
+  $("ruleState").textContent = d.rules.dirty ? "unsaved changes: press Save strategy below"
+    : w.exit_rules.customised ? "saved" : "the default two conditions (not yet customised)";
+  const own = w.customised && (w.customised.strategy || w.customised.risk);
+  $("stratScope").innerHTML = `<span class="scope">${esc(w.label)} only</span> ` +
+    (own ? "Saved for this workspace. The other workspaces keep their own."
+         : "Following the global settings until you save this workspace's own.");
+  stratStateText(ws);
+}
+function stratStateText(ws) {
+  const d = draftOf(ws);
+  $("stratState").textContent = d.strategy || (d.rules && d.rules.dirty) ? "unsaved changes" : "";
+}
+/* Edits are kept per workspace as typed; Save reads the fields on screen. */
+function strategyEdited(ev) {
+  const el = ev.target, ws = ACTIVE.ws;
+  if (!ws || !el || !el.dataset || !el.dataset.sec) return;
+  const d = draftOf(ws);
+  d.strategy = d.strategy || {};
+  d.strategy[el.dataset.sec + "." + el.dataset.key] = el.type === "checkbox" ? el.checked : el.value;
+  stratStateText(ws);
+  if (el.dataset.sec === "risk" || el.dataset.key === "exit_timeframe_minutes") {
+    strategySummary(strategyCfg(ws));
+  }
+}
+["entryGrid", "exitTfGrid", "exitGrid", "indGrid"].forEach((id) => {
+  $(id).addEventListener("input", strategyEdited);
+  $(id).addEventListener("change", strategyEdited);
+});
+
 /* ------------------------------------------------------- exit rule builder */
 let RULE_CAT = null;      // indicators and comparisons, from the server
-let RULES = [];           // the rows on screen, edited in place
-let RULES_DIRTY = false;  // edited since the last load or save
-let RULES_RESET = false;  // "reset to the default two" pressed, not yet saved
 let RULE_TIMER = null;
+// The rows of the workspace on screen: { rows, dirty, reset }.
+const RS = () => draftOf(ACTIVE.ws).rules || (draftOf(ACTIVE.ws).rules = { rows: [], dirty: false, reset: false });
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
 function operandSpec(id) { return (RULE_CAT.operands || []).find((o) => o.id === id); }
@@ -1171,19 +1821,7 @@ function freshOperand(id) {
   return o;
 }
 
-function loadRules(er) {
-  if (!er) return;
-  RULE_CAT = er.catalog;
-  // Leaving the tab and coming back must not throw away rows still being edited.
-  if (RULES_DIRTY) return;
-  RULES = clone(er.rules || []);
-  RULES_RESET = false;
-  renderRules();
-  showRuleText(er, "");
-  $("ruleState").textContent = er.customised
-    ? "saved in config.yaml"
-    : "the default two conditions (not yet customised)";
-}
+
 
 /* One table of condition rows. Used by the Strategy tab (exit rules) and the Scanner (BUY and SELL).
    o = { tbody, addBtn, rows: () => array, catalog: () => cat,
@@ -1323,7 +1961,7 @@ function makeRuleEditor(o) {
 }
 
 const STRATEGY_RULES = makeRuleEditor({
-  tbody: $("ruleRows"), addBtn: $("ruleAdd"), rows: () => RULES, catalog: () => RULE_CAT,
+  tbody: $("ruleRows"), addBtn: $("ruleAdd"), rows: () => RS().rows, catalog: () => RULE_CAT,
   label: "Condition", labelLower: "condition", colspan: 7,
   emptyHtml: `<tr><td colspan="7" class="l mut">No indicator conditions: positions close
       on the stop, the target or the square-off only.</td></tr>`,
@@ -1332,20 +1970,24 @@ const STRATEGY_RULES = makeRuleEditor({
 function renderRules() { STRATEGY_RULES.render(); }
 
 function rulesChanged(rerender) {
-  RULES_DIRTY = true;
-  RULES_RESET = false;
+  const rs = RS();
+  rs.dirty = true;
+  rs.reset = false;
   if (rerender) renderRules();
-  $("ruleState").textContent = "unsaved changes: press Save settings at the bottom";
+  $("ruleState").textContent = "unsaved changes: press Save strategy below";
+  stratStateText(ACTIVE.ws);
   clearTimeout(RULE_TIMER);
   RULE_TIMER = setTimeout(previewRules, 350);
 }
 
 async function previewRules() {
+  const ws = ACTIVE.ws, gen = NAV_GEN, rs = RS();
   try {
-    const d = await api("/api/strategy/exit-rules/preview", { method: "POST",
-      body: JSON.stringify({ rules: RULES_RESET ? null : RULES }) });
+    const d = await api(wsq("/api/strategy/exit-rules/preview", ws), { method: "POST",
+      body: JSON.stringify({ rules: rs.reset ? null : rs.rows }) });
+    if (!current(gen, ws) || TAB !== "strategy") return;   // the answer is for another view
     showRuleText(d, "");
-  } catch (e) { showRuleText(null, e.message); }
+  } catch (e) { if (current(gen, ws) && TAB === "strategy") showRuleText(null, e.message); }
 }
 
 function showRuleText(d, err) {
@@ -1361,43 +2003,83 @@ function showRuleText(d, err) {
 }
 
 $("ruleAdd").onclick = () => {
-  if (!RULE_CAT) return;
-  RULES.push({ join: "OR", left: freshOperand("close"), op: "below",
-               right: freshOperand("vwap"), on: "close", candle_type: "normal" });
+  if (!RULE_CAT || !ACTIVE.ws) return;
+  RS().rows.push({ join: "OR", left: freshOperand("close"), op: "below",
+                   right: freshOperand("vwap"), on: "close", candle_type: "normal" });
   rulesChanged(true);
 };
 $("ruleDefault").onclick = async () => {
-  if (!confirm("Replace these rows with the default two conditions?")) return;
+  const ws = ACTIVE.ws;
+  if (!ws || !confirm("Replace these rows with the default two conditions?")) return;
   try {
-    const d = await api("/api/strategy/exit-rules/preview", { method: "POST",
+    const d = await api(wsq("/api/strategy/exit-rules/preview", ws), { method: "POST",
       body: JSON.stringify({ rules: null }) });
-    RULES = clone(d.rules);
-    RULES_DIRTY = true;
-    RULES_RESET = true;
+    if (ACTIVE.ws !== ws) return;
+    const rs = RS();
+    rs.rows = clone(d.rules);
+    rs.dirty = true;
+    rs.reset = true;
     renderRules();
     showRuleText(d, "");
-    $("ruleState").textContent = "default rows: press Save settings at the bottom to apply";
+    $("ruleState").textContent = "default rows: press Save strategy below to apply";
+    stratStateText(ws);
   } catch (e) { note(e.message); }
 };
 
-$("btnReloadStrat").onclick = () => { RULES_DIRTY = false; loadSettings(); };
+$("btnReloadStrat").onclick = () => {
+  const ws = ACTIVE.ws;
+  if (!ws) return;
+  const d = draftOf(ws);
+  d.strategy = null;
+  d.rules = null;
+  renderStrategy(ws);
+};
+$("btnResetStrat").onclick = async () => {
+  const ws = ACTIVE.ws;
+  if (!ws || !confirm(`Stop saving ${wsLabel(ws)}'s own strategy and risk settings and follow the ` +
+      "global settings? The other workspaces are not affected.")) return;
+  try {
+    WSDATA[ws] = await api(`/api/settings/workspaces/${ws}/reset`, { method: "POST",
+      body: JSON.stringify({ parts: ["strategy", "risk"] }) });
+    const d = draftOf(ws);
+    d.strategy = null;
+    d.rules = null;
+    note(`${wsLabel(ws)} now follows the global strategy.`, "ok");
+    if (ACTIVE.ws === ws && TAB === "strategy") renderStrategy(ws);
+    refresh();
+  } catch (e) { note(e.message); }
+};
 $("btnSaveStrat").onclick = async () => {
-  const patch = { strategy:{}, risk:{}, engine:{} };
-  document.querySelectorAll("[data-sec]").forEach((el) => {
+  const ws = ACTIVE.ws;
+  if (!ws) return;
+  const patch = { strategy: {}, risk: {} };
+  // Only this panel's fields: the System page has engine fields of its own.
+  $("p-strategy").querySelectorAll("[data-sec]").forEach((el) => {
     const sec = el.dataset.sec, key = el.dataset.key;
+    if (!patch[sec]) return;
     if (el.type === "checkbox") { patch[sec][key] = el.checked; return; }
     const raw = el.value.trim();
     if (el.type === "number" || el.dataset.num) patch[sec][key] = raw === "" ? null : Number(raw);
     else patch[sec][key] = raw;
   });
   // Rows go only when touched, so saving other settings never freezes the defaults.
-  if (RULES_DIRTY) patch.strategy.exit_rules = RULES_RESET ? null : RULES;
+  const rs = draftOf(ws).rules;
+  if (rs && rs.dirty) patch.strategy.exit_rules = rs.reset ? null : rs.rows;
+  const btn = $("btnSaveStrat");
+  btn.disabled = true; btn.setAttribute("aria-busy", "true");
   try {
-    await api("/api/settings/config", { method:"PUT", body: JSON.stringify(patch) });
-    note("Settings saved to config.yaml.", "ok");
-    RULES_DIRTY = false;
-    loadSettings(); refresh();
-  } catch (e) { note(e.message); }
+    WSDATA[ws] = await api(`/api/settings/workspaces/${ws}`, { method: "PUT", body: JSON.stringify(patch) });
+    const d = draftOf(ws);
+    d.strategy = null;
+    d.rules = null;
+    note(`${wsLabel(ws)} strategy saved. The other workspaces are unchanged.`, "ok");
+    if (ACTIVE.ws === ws && TAB === "strategy") renderStrategy(ws);
+    refresh();
+  } catch (e) {
+    if (ACTIVE.ws === ws) $("stratState").textContent = e.message;
+    note(e.message);
+  }
+  btn.disabled = false; btn.removeAttribute("aria-busy");
 };
 
 /* ----------------------------------------------------------- order dialog */
@@ -1435,11 +2117,65 @@ function orderDialog(opts) {
           aria-label="Limit price for ${esc(l.label)}" /></td></tr>`).join("");
     $("ordProduct").value = opts.product === "DELIVERY" ? "DELIVERY" : "INTRADAY";
     $("ordExit").value = ["both", "sl_target", "strategy"].includes(opts.exitMode) ? opts.exitMode : "both";
+    // This order's own stop and target (single orders): prefilled, % or price.
+    const lv = opts.levels;
+    $("ordLevels").hidden = !lv;
+    if (lv) {
+      const sl = lv.sl || {}, tp = lv.target || {};
+      $("ordSl").value = sl.value == null ? "" : sl.value;
+      $("ordSlUnit").value = sl.unit === "price" ? "price" : "pct";
+      $("ordTp").value = tp.value == null ? "" : tp.value;
+      $("ordTpUnit").value = tp.unit === "price" ? "price" : "pct";
+      $("ordSl").step = $("ordTp").step = String(tick);
+    }
     $("ordErr").textContent = "";
     updateOrder();
     $("ord").showModal();
     $("ordMkt").focus();
   });
+}
+
+/* The entry the stop and target are measured from: the limit price, else the LTP. */
+function orderRef(o, limit) {
+  if (limit && !o.legs) {
+    const v = Number($("ordLimit").value);
+    return v > 0 ? v : null;
+  }
+  return Number(o.ltp) > 0 ? Number(o.ltp) : null;
+}
+/* This order's stop and target: their levels, and the error beside each field. The
+   server checks the same sides again before anything is sent. */
+function orderLevels(o, limit, exitMode) {
+  const out = { sl: "", tp: "", stop: null, target: null, used: !!o.levels && exitMode !== "strategy" };
+  if (!out.used) return out;
+  const ref = orderRef(o, limit), sign = o.side === "SELL" ? -1 : 1;
+  const side = o.side === "SELL" ? "sell" : "buy";
+  const slRaw = $("ordSl").value.trim(), tpRaw = $("ordTp").value.trim();
+  const slPrice = $("ordSlUnit").value === "price", tpPrice = $("ordTpUnit").value === "price";
+  if (slRaw === "") {
+    out.sl = "Enter a stop: a % of the entry, or a price.";
+  } else {
+    const v = Number(slRaw);
+    if (!(v > 0)) out.sl = "The stop must be above 0.";
+    else if (!slPrice && v >= 100) out.sl = "Use a stop below 100%.";
+    else if (ref) {
+      out.stop = slPrice ? v : ref * (1 - sign * v / 100);
+      if ((ref - out.stop) * sign <= 0) {
+        out.sl = `For a ${side} the stop must be ${sign > 0 ? "below" : "above"} the entry, ${n(ref)}.`;
+      }
+    }
+  }
+  if (tpRaw !== "") {
+    const v = Number(tpRaw);
+    if (!(v > 0)) out.tp = "The target must be above 0, or blank for none.";
+    else if (ref) {
+      out.target = tpPrice ? v : ref * (1 + sign * v / 100);
+      if ((out.target - ref) * sign <= 0) {
+        out.tp = `For a ${side} the target must be ${sign > 0 ? "above" : "below"} the entry, ${n(ref)}.`;
+      }
+    }
+  }
+  return out;
 }
 
 function orderProblem(o, limit, product, exitMode) {
@@ -1480,6 +2216,19 @@ function updateOrder() {
     ? '<span class="down">No stop loss: only the exit conditions close it.</span>'
     : exitMode === "sl_target" ? "Closes on the stop, trailing stop or target only."
     : "Closes on the stop, trailing stop, target or the exit conditions, whichever comes first.");
+  const lv = orderLevels(o, limit, exitMode);
+  if (o.levels) {
+    for (const [id, err] of [["ordSl", lv.sl], ["ordTp", lv.tp]]) {
+      $(id).disabled = $(id + "Unit").disabled = exitMode === "strategy";
+      $(id).setAttribute("aria-invalid", err ? "true" : "false");
+      $(id + "Err").textContent = err;
+    }
+    if (lv.used && !lv.sl && lv.stop != null) {
+      const ref = orderRef(o, limit);
+      hints.push(`Stop at ${n(lv.stop)} (${n(Math.abs(ref - lv.stop) / ref * 100)}% from ${n(ref)})` +
+        (lv.target != null && !lv.tp ? `, target at ${n(lv.target)}.` : ", no target."));
+    }
+  }
   $("ordHint").innerHTML = hints.map((h) => `<span>${h}</span>`).join("");
   $("ordErr").textContent = orderProblem(o, limit, product, exitMode);
   $("ordOk").textContent = (limit ? "Place limit " : "Place market ") + (o.legs ? "orders" : (o.side || "order"));
@@ -1499,6 +2248,15 @@ $("ordForm").onsubmit = (ev) => {
                 exit_mode: $("ordExit").value };
   const problem = orderProblem(o, limit, out.product, out.exit_mode);
   if (problem) { $("ordErr").textContent = problem; return; }
+  const lv = orderLevels(o, limit, out.exit_mode);
+  if (lv.sl || lv.tp) { $(lv.sl ? "ordSl" : "ordTp").focus(); updateOrder(); return; }
+  if (lv.used) {
+    out.sl_value = Number($("ordSl").value);
+    out.sl_unit = $("ordSlUnit").value;
+    // Sent even when blank: null means no target for this order.
+    out.target_value = $("ordTp").value.trim() === "" ? null : Number($("ordTp").value);
+    out.target_unit = $("ordTpUnit").value;
+  }
   if (limit && !o.legs) out.limit_price = Number($("ordLimit").value);
   if (limit && o.legs) {
     out.limit_prices = {};
@@ -1510,6 +2268,8 @@ $("ordForm").onsubmit = (ev) => {
   }
   if (SETTINGS_MODE === "live" && !confirm(`LIVE — REAL MONEY\n\n${o.title}\n` +
       `${limit ? "Limit" : "Market"} · ${out.product.toLowerCase()} · ${EXIT_TEXT[out.exit_mode]}` +
+      (lv.used && lv.stop != null ? `\nStop ${n(lv.stop)}` +
+        (lv.target != null ? ` · target ${n(lv.target)}` : " · no target") : "") +
       (o.confirmWarning ? `\n\n${o.confirmWarning}` : "") + "\n\nSend it?")) return;
   const r = ORD.resolve;
   ORD = null;
@@ -1518,36 +2278,114 @@ $("ordForm").onsubmit = (ev) => {
 };
 
 /* ------------------------------------------------------------------ trade */
+/* Stock Intraday and Option Buyer share this view's markup, never its data: each sees
+   its own approvals and watches only, and the form prefills from its own defaults. */
+let ADD_TOUCHED = false;   // the stock form was edited: its defaults are not re-applied
+$("addForm").addEventListener("input", () => { ADD_TOUCHED = true; });
+function prepareTrade(ws) {
+  $("addStock").hidden = ws !== "stock_intraday";
+  $("optTradeHint").hidden = ws !== "option_buyer";
+  const c = cacheOf(ws);
+  // What this workspace showed last, at once; never the other workspace's rows.
+  renderAppr(c.appr || []);
+  if (c.watches) renderWatches(c.watches);
+  else $("watches").innerHTML = '<tr><td colspan="19" class="mut">Loading…</td></tr>';
+  if (ws === "stock_intraday" && !ADD_TOUCHED) {
+    needWorkspace(ws).then((w) => {
+      if (!w || ACTIVE.ws !== ws || ADD_TOUCHED) return;
+      $("exch").value = wsDefault(ws, "exchange", "NSE");
+      $("qty").value = wsDefault(ws, "quantity", 1);
+      $("dir").value = wsDefault(ws, "direction", "LONG");
+      $("prod").value = wsDefault(ws, "product", "");
+      $("exm").value = wsDefault(ws, "exit_mode", "");
+      $("tf").value = String(w.strategy.timeframe_minutes);
+      $("tradeCandle").value = w.strategy.entry_candle_type || "normal";
+      $("sl").value = w.risk.stop_loss_pct;
+      $("slUnit").value = "pct";
+      $("tp").value = w.risk.target_pct == null ? "" : w.risk.target_pct;
+      $("tpUnit").value = "pct";
+    });
+  }
+}
+function fieldError(id, text) {
+  const el = $(id), err = $(id + "Err");
+  el.setAttribute("aria-invalid", text ? "true" : "false");
+  if (err) err.textContent = text;
+  return !text;
+}
 $("addForm").onsubmit = async (ev) => {
   ev.preventDefault();
+  const ws = ACTIVE.ws;
+  if (ws !== "stock_intraday") return;
+  const symbol = $("sym").value.trim().toUpperCase();
+  const qty = Number($("qty").value), sl = $("sl").value.trim(), tp = $("tp").value.trim();
+  const slPrice = $("slUnit").value === "price", tpPrice = $("tpUnit").value === "price";
+  const both = $("dir").value === "BOTH";
+  const priceOnBoth = "A price needs LONG or SHORT: one price cannot be below a long entry and above a short one. Use % for BOTH.";
+  const ok = [
+    fieldError("sym", /^[A-Z0-9&-]{1,20}$/.test(symbol) ? "" : "Type an NSE or BSE ticker, such as RELIANCE."),
+    fieldError("qty", Number.isInteger(qty) && qty > 0 ? "" : "Enter a whole number of shares, 1 or more."),
+    fieldError("sl", !sl ? ""
+      : slPrice ? (Number(sl) > 0 ? (both ? priceOnBoth : "") : "Enter a stop price above 0.")
+      : (Number(sl) >= 0.1 && Number(sl) <= 50 ? "" : "Use a stop from 0.1% to 50%.")),
+    fieldError("tp", !tp ? ""
+      : !(Number(tp) > 0) ? "Enter a target above 0, or leave it blank for none."
+      : tpPrice && both ? priceOnBoth : ""),
+  ];
+  if (ok.includes(false)) {
+    const bad = ["sym", "qty", "sl", "tp"].find((id) => $(id).getAttribute("aria-invalid") === "true");
+    if (bad) $(bad).focus();
+    return;
+  }
   const body = {
-    symbol: $("sym").value.trim().toUpperCase(),
+    workspace: ws,
+    symbol,
     exchange: $("exch").value,
     direction: $("dir").value,
-    quantity: Number($("qty").value),
+    quantity: qty,
     timeframe_minutes: Number($("tf").value),
     candle_type: $("tradeCandle").value,
-    stop_loss_pct: Number($("sl").value) || null,
-    target_pct: $("tp").value ? Number($("tp").value) : null,
     product: $("prod").value || null,
     exit_mode: $("exm").value || null,
   };
+  // A stop or target as a % of the entry, or as a price; blank = the Strategy default.
+  if (sl) body[slPrice ? "stop_loss_price" : "stop_loss_pct"] = Number(sl);
+  if (tp) body[tpPrice ? "target_price" : "target_pct"] = Number(tp);
+  const btn = $("btnWatch");
+  btn.disabled = true; btn.setAttribute("aria-busy", "true");
   try {
     await api("/api/watches", { method:"POST", body: JSON.stringify(body) });
     const how = {
-      LONG: "It asks for approval to BUY when price is above Advanced VWAP, RSI above its 21-EMA and price above Supertrend.",
-      SHORT: "It asks for approval to SELL when price is below Advanced VWAP, RSI below its 21-EMA and price below Supertrend.",
+      LONG: "It asks for approval to BUY when price is above VWAP, RSI above its 21-EMA and price above Supertrend.",
+      SHORT: "It asks for approval to SELL when price is below VWAP, RSI below its 21-EMA and price below Supertrend.",
       BOTH: "It asks to BUY when the long conditions line up and to SELL when their mirror image does — one position at a time.",
     }[body.direction];
-    note(`${body.symbol} added ${body.direction}. ${how}`, "ok");
+    note(`${body.symbol} added ${body.direction} to Stock Intraday. ${how}`, "ok");
     $("sym").value = "";
     loadTrade();
-  } catch (e) { note(e.message); }
+  } catch (e) {
+    if (/symbol|instrument|not found|unknown/i.test(e.message)) fieldError("sym", e.message);
+    note(e.message);
+  }
+  btn.disabled = false; btn.removeAttribute("aria-busy");
 };
 
 async function loadTrade() {
-  try { renderAppr((await api("/api/approvals")).approvals || []); } catch (e) {}
-  try { renderWatches((await api("/api/watches")).watches || []); } catch (e) {}
+  const ws = ACTIVE.ws, gen = NAV_GEN;
+  if (!ws) return;
+  const sig = viewSignal();
+  const [a, w] = await Promise.allSettled([
+    api(wsq("/api/approvals", ws), { signal: sig }),
+    api(wsq("/api/watches", ws), { signal: sig }),
+  ]);
+  if (!current(gen, ws) || TAB !== "trade") return;   // left the view while this was out
+  const c = cacheOf(ws);
+  if (a.status === "fulfilled") { c.appr = a.value.approvals || []; renderAppr(c.appr); }
+  if (w.status === "fulfilled") { c.watches = w.value.watches || []; renderWatches(c.watches); }
+  else if (!c.watches) {
+    $("watches").innerHTML = '<tr><td colspan="19" class="no2"></td></tr>';
+    $("watches").querySelector("td").textContent = "Could not load watches: " + w.reason.message;
+  }
 }
 
 function renderAppr(list) {
@@ -1574,7 +2412,7 @@ function renderAppr(list) {
              <span>Target <strong>${a.target_price ? n(a.target_price) : "none"}</strong></span>`}
         <span>Product <strong>${a.product === "DELIVERY" ? "delivery" : "intraday"}</strong></span>
         <span>Exit <strong>${esc(EXIT_TEXT[a.exit_mode] || EXIT_TEXT.both)}</strong></span>
-        <span>Advanced VWAP ${n(s.vwap)}</span>
+        <span>VWAP ${n(s.vwap)}</span>
         <span>RSI ${n(s.rsi)} vs ${n(s.rsi_signal_entry)}</span>
         <span>Supertrend ${n(s.supertrend)}</span>
         <span>ADX ${n(s.adx)}</span>
@@ -1648,8 +2486,26 @@ function readyCell(w) {
   if (r.ready) return `<td class="rdy" title="${esc(r.tip)}">READY${r.side ? " " + r.side : ""}</td>`;
   return `<td class="mut" title="${esc(r.tip)}">no · ${r.passed}/${r.total}</td>`;
 }
-function stopCell(p) {
-  if (!p) return "—";
+/* A watch's own stop and target, as the order dialog takes them: % or price. */
+function watchLevels(w) {
+  return {
+    sl: w.stop_loss_price ? { value: w.stop_loss_price, unit: "price" }
+                          : { value: w.stop_loss_pct, unit: "pct" },
+    target: w.target_price ? { value: w.target_price, unit: "price" }
+                           : { value: w.target_pct == null ? "" : w.target_pct, unit: "pct" },
+  };
+}
+/* The stop and target a watch will use for its next entry, before it has one. */
+function plannedLevels(w) {
+  const mode = w.effective_exit_mode || w.exit_mode || "both";
+  if (mode === "strategy") return `<span class="mut" title="No stop: its trades exit on their conditions only">none</span>`;
+  const stop = w.stop_loss_price ? n(w.stop_loss_price) : `${n(w.stop_loss_pct)}%`;
+  const target = w.target_price ? n(w.target_price) : (w.target_pct ? `${n(w.target_pct)}%` : "");
+  return `<span class="mut" title="For the next entry: stop ${esc(stop)}${target ? ", target " + esc(target) : ", no target"}">${esc(stop)}${
+    target ? " · " + esc(target) : ""}</span>`;
+}
+function stopCell(p, w) {
+  if (!p) return w ? plannedLevels(w) : "—";
   if (p.exit_mode === "strategy") {
     return `<span class="mut" title="No stop: this position exits on its conditions only">none</span>`;
   }
@@ -1673,7 +2529,12 @@ function tradeTags(w) {
 
 function renderWatches(list) {
   const tb = $("watches");
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="19" class="mut">No watches yet.</td></tr>'; return; }
+  $("watchN").textContent = list.length ? "(" + list.length + ")" : "";
+  if (!list.length) {
+    tb.innerHTML = `<tr><td colspan="19" class="mut">${ACTIVE.ws === "option_buyer"
+      ? "No option watches yet. Add contracts from Option Scan." : "No watches yet."}</td></tr>`;
+    return;
+  }
   tb.innerHTML = list.map((w) => {
     const s = (w.last_signal && w.last_signal.snapshot) || {};
     const p = w.position;
@@ -1695,7 +2556,7 @@ function renderWatches(list) {
       <td>${n(s.rsi_signal_entry)}</td><td class="${stc}">${n(s.supertrend)}</td><td>${n(s.adx)}</td>
       ${readyCell(w)}
       <td>${p ? n(p.entry_price) : "—"}</td>
-      <td>${stopCell(p)}</td>
+      <td>${stopCell(p, w)}</td>
       <td class="${pnl > 0 ? "up" : pnl < 0 ? "down" : "mut"}">${pnl === null ? "—" : n(pnl)}</td>
       <td class="l mut" title="${esc(w.last_error || w.notes)}">${esc((w.last_error || w.notes || "").slice(0,40))}</td>
       <td style="white-space:nowrap">
@@ -1746,21 +2607,20 @@ function renderWatches(list) {
       if (!w) return;
       const dir = b.dataset.dir;
       const side = sideOf(dir);
-      const stopSide = dir === "SHORT" ? "above" : "below";
       const ltp = w.ltp != null ? w.ltp : ((w.last_signal && w.last_signal.snapshot) || {}).ltp;
       const choice = await orderDialog({
         title: `${side} ${w.quantity} × ${instName(w.instrument)}`,
-        sub: `LTP ${n(ltp)} · skips the signal · stop ${w.stop_loss_pct}% ${stopSide} the entry` +
-          (w.target_pct ? ` · target ${w.target_pct}%` : ""),
+        sub: `LTP ${n(ltp)} · skips the signal · the stop and target start from this watch's own`,
         side, ltp, tick: w.instrument.tick_size,
         product: w.product, exitMode: w.effective_exit_mode || w.exit_mode || RISK.exit_mode,
         cashShort: dir === "SHORT" && isCash(w.instrument),
+        levels: watchLevels(w),
       });
       if (!choice) return;
       b.disabled = true;
       try {
         const r = await api(`/api/watches/${w.id}/enter`, {
-          method: "POST", body: JSON.stringify({ confirm: true, direction: dir, ...choice }) });
+          method: "POST", body: JSON.stringify({ confirm: true, direction: dir, workspace: w.workspace_effective || ACTIVE.ws, ...choice }) });
         const p = r.watch && r.watch.position;
         note(p
           ? `${side} filled at ${n(p.entry_price)}` + (p.exit_mode === "strategy"
@@ -1788,30 +2648,49 @@ function renderWatches(list) {
 }
 
 /* ---------------------------------------------------------------- options */
-const OPTION_TABS = ["scan", "straddle"];
-function showOptionTab(name) {
-  OPTION_TABS.forEach((tab) => {
-    const button = $("opt-tab-" + tab), panel = $("opt-panel-" + tab);
-    const selected = tab === name;
-    button.setAttribute("aria-selected", selected ? "true" : "false");
-    button.tabIndex = selected ? 0 : -1;
-    button.classList.toggle("go", selected);
-    panel.hidden = !selected;
-  });
-  if (name === "straddle") loadStraddleExpiries();
+/* Option Scan belongs to Option Buyer and Straddle Scan to Option Seller. Each form
+   starts from its workspace's Setup defaults until it is edited, then keeps the
+   edits for as long as the page is open. */
+const TOUCHED = { optscan: false, straddle: false };
+$("chainForm").addEventListener("input", () => { TOUCHED.optscan = true; });
+$("straddleForm").addEventListener("input", () => { TOUCHED.straddle = true; });
+function setSelect(id, value) {
+  const el = $(id), want = String(value);
+  if (![...el.options].some((o) => o.value === want)) {
+    el.insertAdjacentHTML("beforeend", `<option value="${esc(want)}">${esc(want)}</option>`);
+  }
+  el.value = want;
 }
-OPTION_TABS.forEach((tab, index) => {
-  const button = $("opt-tab-" + tab);
-  button.onclick = () => showOptionTab(tab);
-  button.onkeydown = (ev) => {
-    if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
-    ev.preventDefault();
-    const next = OPTION_TABS[
-      (index + (ev.key === "ArrowRight" ? 1 : OPTION_TABS.length - 1)) % OPTION_TABS.length
-    ];
-    showOptionTab(next); $("opt-tab-" + next).focus();
-  };
-});
+async function prepareOptionScan() {
+  const ws = "option_buyer", gen = NAV_GEN;
+  const w = await needWorkspace(ws);
+  if (!current(gen, ws)) return;
+  if (w && !TOUCHED.optscan) {
+    setSelect("und", wsDefault(ws, "underlying", "NIFTY"));
+    $("otm").value = wsDefault(ws, "otm_count", 5);
+    $("otf").value = String(wsDefault(ws, "timeframe_minutes", 1));
+    $("optCandle").value = wsDefault(ws, "candle_type", "normal");
+    $("ref").value = wsDefault(ws, "reference", "index");
+    $("amin").value = wsDefault(ws, "adx_min", 20);
+    $("lots").value = wsDefault(ws, "lots", 1);
+  }
+  // The conditions: what this browser kept, the rest from Option Buyer's strategy.
+  if (w) renderConditions(w);
+  loadExpiries();
+  if ($("autoScan").checked && !SCAN_TIMER) SCAN_TIMER = setInterval(scan, 20000);
+}
+async function prepareStraddle() {
+  const ws = "option_seller", gen = NAV_GEN;
+  const w = await needWorkspace(ws);
+  if (!current(gen, ws)) return;
+  if (w && !TOUCHED.straddle) {
+    setSelect("strUnd", wsDefault(ws, "underlying", "NIFTY"));
+    $("strTf").value = String(wsDefault(ws, "timeframe_minutes", 1));
+    $("strCandle").value = wsDefault(ws, "candle_type", "normal");
+    $("strLots").value = wsDefault(ws, "lots", 1);
+  }
+  loadStraddleExpiries();
+}
 
 async function loadExpiries() {
   try {
@@ -1835,6 +2714,7 @@ $("strUnd").onchange = loadStraddleExpiries;
 $("straddleForm").onsubmit = (ev) => { ev.preventDefault(); loadStraddles(); };
 
 async function loadStraddles() {
+  const gen = NAV_GEN, ws = ACTIVE.ws;
   const q = new URLSearchParams({
     underlying: $("strUnd").value,
     timeframe_minutes: $("strTf").value,
@@ -1842,10 +2722,12 @@ async function loadStraddles() {
   });
   if ($("strExp").value) q.set("expiry", $("strExp").value);
   $("btnStraddle").disabled = true;
+  $("btnStraddle").setAttribute("aria-busy", "true");
   $("straddleMeta").textContent = "";
   $("straddleRows").innerHTML = '<tr><td colspan="13" class="mut">Scanning 15 straddles…</td></tr>';
   try {
-    const d = await api("/api/options/straddles?" + q.toString());
+    const d = await api("/api/options/straddles?" + q.toString(), { signal: viewSignal() });
+    if (!current(gen, ws)) return;   // left Straddle Scan while it loaded
     STRADDLE_DATA = d;
     const rows = d.rows || [];
     const incomplete = rows.filter((row) => row.error).length;
@@ -1861,11 +2743,15 @@ async function loadStraddles() {
       (incomplete ? " · " + incomplete + " incomplete row(s)" : "");
     renderStraddles(d);
   } catch (e) {
+    if (!current(gen, ws)) return;
     STRADDLE_DATA = null;
     note(e.message);
     $("straddleRows").innerHTML = '<tr><td colspan="13" class="down"></td></tr>';
     $("straddleRows").querySelector("td").textContent = e.message;
-  } finally { $("btnStraddle").disabled = false; }
+  } finally {
+    $("btnStraddle").disabled = false;
+    $("btnStraddle").removeAttribute("aria-busy");
+  }
 }
 
 function straddleStateClass(value) {
@@ -1930,7 +2816,7 @@ function renderStraddles(d) {
       <td class="${move}" title="Previous close ${n(row.previous_close)}">${n(row.change_price)}</td>
       <td class="${move}">${percent}</td>
       <td>${n(row.close)}</td><td>${n(row.open)}</td><td>${n(row.high)}</td><td>${n(row.low)}</td>
-      <td>${straddleIndicator(row.vwap, row.vwap_position, "Advanced VWAP")}</td>
+      <td>${straddleIndicator(row.vwap, row.vwap_position, "VWAP")}</td>
       <td>${straddleIndicator(row.supertrend, row.supertrend_position, "Supertrend")}</td>
       <td>${straddleIndicator(row.ema_21, row.ema_21_position, "EMA(21)")}</td>
       <td class="${straddleStateClass(status)}"><strong>${esc(status)}</strong></td>
@@ -1947,8 +2833,7 @@ function renderStraddles(d) {
       if (!row || !row.ce || !row.pe) return;
       const lots = Math.max(1, Math.floor(Number($("strLots").value) || 1));
       const legs = [row.ce, row.pe].map((leg) => `${leg.chart_symbol}@BUY@${lots}`).join(",");
-      window.open("/combo?" + new URLSearchParams({ legs, tf: tfCode(d.timeframe_minutes) }),
-                  "matheranCombo");
+      openCombo({ legs, tf: tfCode(d.timeframe_minutes) });
     };
   });
   body.querySelectorAll(".strTrade").forEach((button) => {
@@ -1993,6 +2878,7 @@ async function tradeStraddle(row, direction, data, button) {
   let basket = null;
   try {
     basket = await api("/api/baskets", { method: "POST", body: JSON.stringify({
+      workspace: "option_seller",
       name, timeframe_minutes: Number(data.timeframe_minutes),
       legs: [row.ce, row.pe].map((leg) => ({ symbol: leg.chart_symbol, direction, lots })),
       stop_loss_pct: null, target_pct: null, product: choice.product, exit_mode: choice.exit_mode,
@@ -2001,6 +2887,7 @@ async function tradeStraddle(row, direction, data, button) {
       body: JSON.stringify({
         confirm: true,
         rollback_on_failure: true,
+        workspace: "option_seller",
         ...choice,
         straddle_guard: {
           underlying: data.underlying,
@@ -2020,7 +2907,7 @@ async function tradeStraddle(row, direction, data, button) {
         .map((item) => `${item.label || item.symbol}: ${item.detail || item.status}`).join("; ");
       note(`${rollback.error || rollback.warning || "CRITICAL — residual partial exposure remains."} ` +
         `${result.sent} leg${result.sent === 1 ? " was" : "s were"} acknowledged as sent; ${rollback.compensated || 0} confirmed compensated. ` +
-        `${cause}${residual ? "; " + residual : ""} Open Trade/Baskets now.`);
+        `${cause}${residual ? "; " + residual : ""} Open Option Seller › Basket and Journal now.`);
     } else if (rollback.triggered && rollback.attempted) {
       note(`COMPENSATED — sequential straddle submission stopped after a leg failed; ` +
         `${rollback.compensated} previously sent leg${rollback.compensated === 1 ? " is" : "s are"} confirmed flat. ` +
@@ -2035,42 +2922,194 @@ async function tradeStraddle(row, direction, data, button) {
         `(${result.mode}, ${String(result.product || "").toLowerCase()}).`, "ok");
     }
   } catch (e) { note(e.message); }
-  if (basket) {
-    loadTrade();
-    loadBaskets();
-  }
   button.disabled = row.trade_ready !== true || row.status !== wanted;
 }
 $("und").onchange = loadExpiries;
 $("autoScan").onchange = () => {
   if (SCAN_TIMER) { clearInterval(SCAN_TIMER); SCAN_TIMER = null; }
-  if ($("autoScan").checked) SCAN_TIMER = setInterval(scan, 20000);
+  // Runs only while Option Scan is on screen; leaving it stops the timer, coming back
+  // starts it again if this stays ticked.
+  if ($("autoScan").checked && TAB === "option-scan") SCAN_TIMER = setInterval(scan, 20000);
 };
 $("chainForm").onsubmit = (ev) => { ev.preventDefault(); scan(); };
 
+/* ------------------------------------------------- option scan conditions */
+/* Which conditions READY needs (every ticked one: AND), the timeframe each reads and
+   the indicator periods, for Option Buyer's scan only. Kept in this browser. A period
+   not edited here follows Option Buyer's strategy; a blank timeframe is the scan's. */
+const COND_IDS = ["vwap", "rsi", "ema", "supertrend", "adx"];
+const COND_DEFAULT_ON = { vwap: true, rsi: true, ema: false, supertrend: true, adx: true };
+const COND_Q = { vwap: "vwap", rsi: "rsi", ema: "ema", supertrend: "st", adx: "adx" };
+const COND_LABELS = { vwap: "price above VWAP", rsi: "RSI above EMA(RSI)", ema: "price above EMA",
+                      supertrend: "price above Supertrend", adx: "ADX above the minimum" };
+// Period input -> [the strategy setting it defaults to, lowest, highest, whole number]
+const COND_PERIODS = {
+  rsi_period: ["rsi_period", 2, 200, true],
+  rsi_signal_period: ["rsi_signal_entry_period", 1, 200, true],
+  ema_period: ["price_ema_period", 1, 500, true],
+  st_period: ["supertrend_period", 1, 200, true],
+  st_factor: ["supertrend_factor", 0.01, 20, false],
+  adx_period: ["adx_period", 2, 100, true],
+};
+const COND_KEY = "saidarshan.ws.option_buyer.optscanConditions.v1";
+function condRead() {
+  try {
+    const v = JSON.parse(localStorage.getItem(COND_KEY) || "null");
+    if (v && typeof v === "object") {
+      return { conds: v.conds && typeof v.conds === "object" ? v.conds : {},
+               params: v.params && typeof v.params === "object" ? v.params : {} };
+    }
+  } catch (e) { /* unreadable: start from the strategy */ }
+  return { conds: {}, params: {} };
+}
+let COND = condRead();
+function condSave() {
+  try { localStorage.setItem(COND_KEY, JSON.stringify(COND)); } catch (e) { /* storage off */ }
+}
+function condTfOptions(sel, value) {
+  sel.innerHTML = `<option value="">Scan timeframe (${esc(tfCode($("otf").value))})</option>` +
+    TFS.map((t) => `<option value="${t.minutes}">${esc(t.label)}</option>`).join("");
+  sel.value = value && TFS.some((t) => String(t.minutes) === String(value)) ? String(value) : "";
+}
+function renderConditions(w) {
+  const s = (w && w.strategy) || {};
+  for (const id of COND_IDS) {
+    const st = COND.conds[id] || {};
+    $("cOn-" + id).checked = typeof st.on === "boolean" ? st.on : COND_DEFAULT_ON[id];
+    condTfOptions($("cTf-" + id), st.tf || "");
+  }
+  for (const [key, [setting]] of Object.entries(COND_PERIODS)) {
+    const el = $("cP-" + key), stored = COND.params[key];
+    el.dataset.strategy = s[setting] == null ? "" : String(s[setting]);
+    el.value = stored !== undefined && stored !== "" ? stored : el.dataset.strategy;
+  }
+  condErrors();
+}
+/* Field errors beside their row; returns the first control to fix, or null. */
+function condErrors() {
+  const rowErr = {};
+  let first = null;
+  for (const [key, [, lo, hi, whole]] of Object.entries(COND_PERIODS)) {
+    const el = $("cP-" + key), raw = el.value.trim(), v = Number(raw);
+    const bad = raw === "" || !Number.isFinite(v) || v < lo || v > hi || (whole && !Number.isInteger(v));
+    el.setAttribute("aria-invalid", bad ? "true" : "false");
+    if (bad) {
+      const name = el.closest("label").firstChild.textContent.trim();
+      rowErr[el.dataset.row] = rowErr[el.dataset.row] ||
+        `${name}: ${whole ? "a whole number" : "a number"} from ${lo} to ${hi}.`;
+      first = first || el;
+    }
+  }
+  const am = $("amin"), araw = am.value.trim(), av = Number(araw);
+  const badMin = araw !== "" && (!Number.isFinite(av) || av < 0 || av > 100);
+  am.setAttribute("aria-invalid", badMin ? "true" : "false");
+  if (badMin) { rowErr.adx = rowErr.adx || "Minimum: a number from 0 to 100."; first = first || am; }
+  for (const id of ["rsi", "ema", "supertrend", "adx"]) $("cErr-" + id).textContent = rowErr[id] || "";
+  const none = !COND_IDS.some((id) => $("cOn-" + id).checked);
+  $("condErr").textContent = none ? "Tick at least one condition for READY." : "";
+  return first || (none ? $("cOn-vwap") : null);
+}
+$("condBox").addEventListener("change", (ev) => {
+  const el = ev.target;
+  if (el.dataset.cond) (COND.conds[el.dataset.cond] = COND.conds[el.dataset.cond] || {}).on = el.checked;
+  else if (el.dataset.condTf) (COND.conds[el.dataset.condTf] = COND.conds[el.dataset.condTf] || {}).tf = el.value;
+  else if (el.dataset.condP) COND.params[el.dataset.condP] = el.value.trim();
+  else { condErrors(); return; }
+  TOUCHED.optscan = true;
+  condSave();
+  condErrors();
+});
+$("condBox").addEventListener("input", (ev) => {
+  const el = ev.target;
+  if (!el.dataset.condP) return;
+  COND.params[el.dataset.condP] = el.value.trim();
+  condSave();
+});
+$("condReset").onclick = () => {
+  COND = { conds: {}, params: {} };
+  try { localStorage.removeItem(COND_KEY); } catch (e) { /* storage off */ }
+  renderConditions(WSDATA.option_buyer);
+  $("amin").value = wsDefault("option_buyer", "adx_min", 20);
+  condErrors();
+  note("Scan conditions are back to Option Buyer's strategy.", "ok");
+};
+// The blank timeframe option names the scan timeframe it stands for.
+$("otf").addEventListener("change", () => {
+  COND_IDS.forEach((id) => condTfOptions($("cTf-" + id), $("cTf-" + id).value));
+});
+/* Column headings for what the last scan computed: periods, and a timeframe when a
+   condition reads another one than the scan's. */
+function scanHeadings(d) {
+  const p = d.periods || {}, on = {}, tf = {};
+  for (const c of d.conditions || []) { on[c.id] = c.on; tf[c.id] = c.timeframe_minutes; }
+  const tag = (id) => (tf[id] && Number(tf[id]) !== Number(d.timeframe_minutes) ? " " + tfCode(tf[id]) : "");
+  const off = (id) => (on[id] === false ? ' <span class="offtag">off</span>' : "");
+  const set = (hid, id, text) => {
+    const th = $(hid);
+    th.innerHTML = esc(text + tag(id)) + off(id);
+    th.title = on[id] === false ? "Not required for READY in this scan" : "";
+  };
+  set("hVwap", "vwap", "VWAP");
+  set("hAbove", "vwap", ">VWAP");
+  set("hRsi", "rsi", `RSI(${p.rsi_period ?? 21})`);
+  set("hRsiEma", "rsi", `EMA(RSI,${p.rsi_signal_period ?? 21})`);
+  set("hEma", "ema", `EMA(${p.ema_period ?? 21})`);
+  set("hSt", "supertrend", `Supertrend(${p.st_period ?? 21},${p.st_factor ?? 0.618})`);
+  set("hAdx", "adx", `ADX(${p.adx_period ?? 14})`);
+}
+
+let SCAN_BUSY = false;
 async function scan() {
+  if (SCAN_BUSY || ACTIVE.ws !== "option_buyer" || TAB !== "option-scan") return;
+  const bad = condErrors();
+  if (bad) { bad.focus(); return; }
+  const gen = NAV_GEN, ws = ACTIVE.ws;
   const q = new URLSearchParams({
     underlying: $("und").value, otm: $("otm").value,
-    timeframe_minutes: $("otf").value, reference: $("ref").value, adx_min: $("amin").value,
-    candle_type: $("optCandle").value,
+    timeframe_minutes: $("otf").value, reference: $("ref").value,
+    candle_type: $("optCandle").value, workspace: ws,
   });
+  if ($("amin").value.trim() !== "") q.set("adx_min", $("amin").value.trim());
+  for (const id of COND_IDS) {
+    q.set(COND_Q[id] + "_on", $("cOn-" + id).checked ? "true" : "false");
+    if ($("cTf-" + id).value) q.set(COND_Q[id] + "_tf", $("cTf-" + id).value);
+  }
+  for (const key of Object.keys(COND_PERIODS)) {
+    const el = $("cP-" + key);
+    // Only what differs from the strategy, so an untouched scan is the strategy's gate.
+    if (el.dataset.strategy === "" || Number(el.value) !== Number(el.dataset.strategy)) {
+      q.set(key, el.value.trim());
+    }
+  }
   if ($("exp").value) q.set("expiry", $("exp").value);
+  SCAN_BUSY = true;
   $("btnScan").disabled = true;
+  $("btnScan").setAttribute("aria-busy", "true");
   $("chain").innerHTML = '<tr><td colspan="14" class="mut">Scanning…</td></tr>';
   try {
-    const d = await api("/api/options/chain?" + q.toString());
+    const d = await api("/api/options/chain?" + q.toString(), { signal: viewSignal() });
+    if (!current(gen, ws)) return;
     $("chainMeta").textContent =
       d.underlying + " " + d.expiry + " · " + d.reference + " " + d.reference_symbol + " " + n(d.spot) +
       " · ATM " + d.atm_strike + " · step " + d.strike_step + " · " + tfCode(d.timeframe_minutes) +
       " · " + (d.candle_type === "heikin_ashi" ? "Heikin Ashi" : "Normal candle") + " · ADX>" +
-      n(d.adx_min,0) + " · " + d.above_vwap.length + " above Advanced VWAP · " + d.entry_ready.length + " entry-ready" +
+      n(d.adx_min,0) + " · " + d.above_vwap.length + " above VWAP · " + d.entry_ready.length + " READY" +
+      (d.strategy_gate === false ? " (custom conditions)" : "") +
       (d.missing_legs && d.missing_legs.length ? " · not listed: " + d.missing_legs.join(", ") : "");
+    $("condNote").hidden = d.strategy_gate !== false;
+    scanHeadings(d);
     renderChain(d);
+    SHELL && SHELL.announce && SHELL.announce(`Option Scan: ${d.entry_ready.length} of ${(d.rows || []).length} READY.`);
   } catch (e) {
+    if (!current(gen, ws)) return;
     note(e.message);
     $("chain").innerHTML = '<tr><td colspan="14" class="down"></td></tr>';
     $("chain").querySelector("td").textContent = e.message;
-  } finally { $("btnScan").disabled = false; }
+  } finally {
+    SCAN_BUSY = false;
+    $("btnScan").disabled = false;
+    $("btnScan").removeAttribute("aria-busy");
+  }
 }
 
 function renderChain(d) {
@@ -2079,8 +3118,14 @@ function renderChain(d) {
   if (!rows.length) { tb.innerHTML = '<tr><td colspan="14" class="mut">No rows.</td></tr>'; return; }
   tb.innerHTML = rows.map((r) => {
     const why = r.error ? r.error
-      : (r.reasons || []).filter((x) => !x.startsWith("all entry")).join("; ");
+      : (r.reasons || []).filter((x) => !x.startsWith("all entry") && !x.startsWith("all ticked")).join("; ");
     const stc = r.supertrend_direction === -1 ? "up" : "down";
+    // Each condition, met or not, with its timeframe: the READY cell's tooltip.
+    const conds = r.conditions || [];
+    const required = conds.filter((c) => c.on);
+    const met = required.filter((c) => c.met).length;
+    const tip = conds.map((c) => `${c.on ? (c.met ? "✓" : "✗") : "–"} ${COND_LABELS[c.id] || c.id} ` +
+      `(${c.timeframe})${c.on ? "" : ", not required"}${c.on && !c.met && c.reason ? ": " + c.reason : ""}`).join("\n");
     return `<tr class="${r.entry_ready ? "ready" : ""}">
       <td class="l">${esc(r.display_name || r.symbol)}</td>
       <td class="l">${esc(r.option_type || "")}</td><td>${n(r.strike,0)}</td>
@@ -2088,7 +3133,8 @@ function renderChain(d) {
       <td class="${r.price_above_vwap ? "yes" : "mut"}">${r.price_above_vwap ? "yes" : "no"}</td>
       <td>${n(r.rsi)}</td><td>${n(r.rsi_ema_21)}</td><td>${n(r.price_ema_21)}</td>
       <td class="${stc}">${n(r.supertrend)}</td><td>${n(r.adx)}</td>
-      <td class="${r.entry_ready ? "yes" : "mut"}">${r.entry_ready ? "READY" : "no"}</td>
+      <td class="${r.entry_ready ? "yes" : "mut"}" title="${esc(tip)}">${r.entry_ready ? "READY"
+        : required.length && !r.error ? `no · ${met}/${required.length}` : "no"}</td>
       <td class="l mut" title="${esc(why)}">${esc(why.slice(0,52))}</td>
       <td style="white-space:nowrap">
         <button type="button" class="sm chartOpt" data-strike="${r.strike}"
@@ -2123,24 +3169,29 @@ function renderChain(d) {
       const choice = await orderDialog({
         title: `BUY ${qty} (${lots} lot${lots > 1 ? "s" : ""}) × ${$("und").value} ` +
           `${Number(btn.dataset.strike)} ${btn.dataset.opt}`,
-        sub: `LTP ${n(ltp)} · skips the signal · ${RISK.stop_loss_pct || 3}% protective stop`,
+        sub: `LTP ${n(ltp)} · skips the signal`,
         side: "BUY", ltp, tick: 0.05,
         product: RISK.default_product, exitMode: RISK.exit_mode,
+        // This order's stop and target: Option Buyer's risk defaults, editable.
+        levels: { sl: { value: RISK.stop_loss_pct || 3, unit: "pct" },
+                  target: { value: RISK.target_pct || "", unit: "pct" } },
       });
       if (!choice) return;
       btn.disabled = true;
       try {
         const r = await api("/api/options/buy", { method:"POST", body: JSON.stringify({
+          workspace: "option_buyer",
           security_id: btn.dataset.sid, underlying: $("und").value, expiry: d.expiry,
           strike: Number(btn.dataset.strike), option_type: btn.dataset.opt, lots,
-          timeframe_minutes: Number($("otf").value), adx_min: Number($("amin").value),
+          timeframe_minutes: Number($("otf").value),
+          adx_min: $("amin").value.trim() === "" ? null : Number($("amin").value),
           candle_type: d.candle_type,
           confirm: true, ...choice,
         }) });
         const p = r.watch && r.watch.position;
         note((p ? `Bought at ${n(p.entry_price)}` + (p.exit_mode === "strategy" ? " — no stop"
                    : ` — stop at ${n(p.stop_price)}`)
-                : `Limit buy working at ${n(choice.limit_price)}`) + ". See the Trade tab.", "ok");
+                : `Limit buy working at ${n(choice.limit_price)}`) + ". See Option Buyer › Trade.", "ok");
       } catch (e) { note(e.message); }
       btn.disabled = false;
     };
@@ -2150,16 +3201,20 @@ function renderChain(d) {
     btn.onclick = async () => {
       const lots = Number($("lots").value) || 1;
       if (!confirm("Watch this contract?\n\n" + lots + " lot(s) = " + (lots * Number(btn.dataset.lot)) +
-          " qty.\nThe engine will ask for approval before buying.")) return;
+          " qty.\nThe engine will ask for approval before buying, when Option Buyer's Strategy " +
+          "entry conditions hold on " + tfCode($("otf").value) + " candles" +
+          (d.strategy_gate === false ? " (not this scan's custom conditions)." : ".") )) return;
       try {
         await api("/api/options/watches", { method:"POST", body: JSON.stringify({
+          workspace: "option_buyer",
           security_id: btn.dataset.sid, underlying: $("und").value,
           expiry: d.expiry, strike: Number(btn.dataset.strike),
           option_type: btn.dataset.opt, lots,
-          timeframe_minutes: Number($("otf").value), adx_min: Number($("amin").value),
+          timeframe_minutes: Number($("otf").value),
+          adx_min: $("amin").value.trim() === "" ? null : Number($("amin").value),
           candle_type: d.candle_type,
         }) });
-        note("Option watch added — see the Trade tab.", "ok");
+        note("Option watch added — see Option Buyer › Trade.", "ok");
       } catch (e) { note(e.message); }
     };
   });
@@ -2222,6 +3277,18 @@ function showResolved(row) {
 }
 
 $("bkAddLeg").onclick = addLegRow;
+/* Option Seller's Setup defaults fill the new-basket form until it is edited. */
+let BK_TOUCHED = false;
+$("p-baskets").querySelector(".row").addEventListener("input", () => { BK_TOUCHED = true; });
+async function prepareBaskets() {
+  const ws = "option_seller", gen = NAV_GEN;
+  const w = await needWorkspace(ws);
+  if (!current(gen, ws) || !w || BK_TOUCHED) return;
+  $("bkProd").value = wsDefault(ws, "product", "");
+  $("bkExit").value = wsDefault(ws, "exit_mode", "");
+  $("bkSl").value = wsDefault(ws, "stop_loss_pct", "");
+  $("bkTp").value = wsDefault(ws, "target_pct", "");
+}
 $("bkCreate").onclick = async () => {
   const legs = [];
   for (const row of $("bkLegRows").children) {
@@ -2235,6 +3302,7 @@ $("bkCreate").onclick = async () => {
   $("bkCreate").disabled = true;
   try {
     const b = await api("/api/baskets", { method: "POST", body: JSON.stringify({
+      workspace: "option_seller",
       name: $("bkName").value.trim() || "basket", legs,
       timeframe_minutes: Number($("bkTf").value),
       stop_loss_pct: sl ? Number(sl) : null, target_pct: tp ? Number(tp) : null,
@@ -2303,9 +3371,16 @@ function basketCard(b) {
   </div>`;
 }
 
+let BK_LOADING = false;
 async function loadBaskets() {
+  const ws = ACTIVE.ws, gen = NAV_GEN;
+  if (ws !== "option_seller" || BK_LOADING) return;
   let d;
-  try { d = await api("/api/baskets"); } catch (e) { note(e.message); return; }
+  BK_LOADING = true;
+  try { d = await api(wsq("/api/baskets", ws), { signal: viewSignal() }); }
+  catch (e) { if (current(gen, ws)) note(e.message); return; }
+  finally { BK_LOADING = false; }
+  if (!current(gen, ws) || TAB !== "basket") return;
   const list = d.baskets || [];
   $("bkCount").textContent = list.length ? `(${list.length})` : "";
   const box = $("bkList");
@@ -2316,8 +3391,7 @@ async function loadBaskets() {
   box.querySelectorAll("[data-bkcombo]").forEach((btn) => {
     btn.onclick = () => {
       const b = find(btn.dataset.bkcombo);
-      if (b) window.open("/combo?" + new URLSearchParams({ basket: b.id, tf: tfCode(b.timeframe_minutes) }),
-                         "matheranCombo");
+      if (b) openCombo({ basket: b.id, tf: tfCode(b.timeframe_minutes) });
     };
   });
   box.querySelectorAll("[data-bkchart]").forEach((btn) => {
@@ -2346,7 +3420,7 @@ async function loadBaskets() {
       btn.disabled = true;
       try {
         const r = await api(`/api/baskets/${b.id}/execute`, { method: "POST",
-          body: JSON.stringify({ confirm: true, ...choice }) });
+          body: JSON.stringify({ confirm: true, workspace: "option_seller", ...choice }) });
         const failed = (r.legs || []).filter((x) => x.status !== "sent");
         if (failed.length) {
           note(`${r.partial ? "PARTIAL — " : ""}${r.sent} of ${r.legs.length} legs sent. ` +
@@ -2412,9 +3486,33 @@ async function loadBaskets() {
 }
 
 /* ---------------------------------------------------------------- journal */
+/* Each workspace's journal holds only the rows it owns: rows written from now on name
+   their workspace, older rows are assigned once by the legacy rule (see System). */
+function renderJournalCache(ws) {
+  const c = cacheOf(ws);
+  if (c.trades) renderTrades(c.trades);
+  else { $("pnlSum").textContent = ""; $("trades").innerHTML = '<tr><td colspan="10" class="mut">Loading…</td></tr>'; }
+  if (c.positions) renderPositions(c.positions);
+  else $("positions").innerHTML = '<tr><td colspan="9" class="mut">Loading…</td></tr>';
+}
+let JR_LOADING = "";
 async function loadJournal() {
-  try {
-    const d = await api("/api/trades?limit=200");
+  const ws = ACTIVE.ws, gen = NAV_GEN;
+  if (!ws || JR_LOADING === ws + gen) return;
+  JR_LOADING = ws + gen;
+  const sig = viewSignal();
+  const [t, p] = await Promise.allSettled([
+    api(wsq("/api/trades?limit=200", ws), { signal: sig }),
+    api(wsq("/api/positions", ws), { signal: sig }),
+  ]);
+  if (JR_LOADING === ws + gen) JR_LOADING = "";
+  if (!current(gen, ws) || TAB !== "journal") return;
+  const c = cacheOf(ws);
+  if (t.status === "fulfilled") { c.trades = t.value; renderTrades(c.trades); }
+  if (p.status === "fulfilled") { c.positions = p.value; renderPositions(c.positions); }
+}
+function renderTrades(d) {
+  {
     const rows = (d.trades || []).slice().reverse();
     $("pnlSum").textContent = rows.length
       ? "· realised " + (d.realised_pnl >= 0 ? "+" : "") + n(d.realised_pnl) + " · " + d.wins + "W / " + d.losses + "L"
@@ -2429,12 +3527,13 @@ async function loadJournal() {
         <td class="l">${esc(reasonText(t.exit_reason, t.direction))}${t.exit_note
           ? `<div class="mut" style="font-size:11.5px;white-space:normal;max-width:440px">${esc(t.exit_note)}</div>`
           : ""}</td>
-        <td class="l">${esc(t.mode)}${t.product === "DELIVERY" ? " · delivery" : ""}</td></tr>`).join("")
-      : '<tr><td colspan="10" class="mut">No trades yet.</td></tr>';
-  } catch (e) {}
-
-  try {
-    const p = await api("/api/positions");
+        <td class="l">${esc(t.mode)}${t.product === "DELIVERY" ? " · delivery" : ""}${t.workspace_assigned_by === "legacy rule"
+          ? ' <span class="tagb" title="Written before workspaces; assigned to this workspace by the legacy rule">legacy</span>' : ""}</td></tr>`).join("")
+      : `<tr><td colspan="10" class="mut">No trades in ${esc(wsLabel(ACTIVE.ws))} yet.</td></tr>`;
+  }
+}
+function renderPositions(p) {
+  {
     const rows = p.engine_positions || [];
     $("positions").innerHTML = rows.length ? rows.map((x) => `<tr>
         <td class="l">${esc(instName(x.instrument))}</td>
@@ -2447,12 +3546,13 @@ async function loadJournal() {
     $("positions").querySelectorAll("[data-pexit]").forEach((b) => {
       b.onclick = async () => {
         if (!confirm("Exit this position at market?")) return;
+        b.disabled = true;
         try { await api("/api/watches/" + b.dataset.pexit + "/exit", { method:"POST" }); }
         catch (e) { note(e.message); }
         loadJournal();
       };
     });
-  } catch (e) {}
+  }
 }
 
 /* ---------------------------------------------------------------- scanner */
@@ -2983,11 +4083,14 @@ function scDisarm(reason) {
   if (was) scAnnounce("Auto-rescan off" + (reason ? ": " + reason : ""));
 }
 function scAutoUI(reason) {
-  const tab = $("tab-scanner"), hint = $("scAutoHint");
+  // The Scanner tab exists only while Stock Intraday is the workspace on screen.
+  const tab = $("view-tab-scanner"), hint = $("scAutoHint");
   const armed = !!(SC.auto && SC.auto.armed);
-  tab.textContent = armed ? "Scanner · auto" : "Scanner";
-  if (armed) tab.setAttribute("aria-label", `Scanner, auto-rescan every ${SC.auto.interval} minutes`);
-  else tab.removeAttribute("aria-label");
+  if (tab) {
+    tab.textContent = armed ? "Scanner · auto" : "Scanner";
+    if (armed) tab.setAttribute("aria-label", `Scanner, auto-rescan every ${SC.auto.interval} minutes`);
+    else tab.removeAttribute("aria-label");
+  }
   const minutes = Number($("scAuto").value) || 0;
   let text = "";
   if (reason) text = reason;
@@ -3254,6 +4357,7 @@ function scRenderResults() {
         let refreshWatches = false;
         try {
           const body = {
+            workspace: "stock_intraday",
             symbol: r.symbol,
             exchange: r.exchange,
             direction: side === "SELL" ? "SHORT" : "LONG",
@@ -3313,16 +4417,20 @@ $("scFilter").onchange = () => {
 $("scMinMet").oninput = () => scRenderResults();
 
 /* ---------------------------------------------------------------- refresh */
+/* Every 7 s while the page is visible: the global status, then the view on screen.
+   The status carries the active workspace's risk defaults for the order dialog. */
+let LAST_STATUS = null;
 async function refresh() {
+  const ws = ACTIVE.ws, gen = NAV_GEN;
   let st;
-  try { st = await api("/api/status"); }
+  try { st = await api(ws ? wsq("/api/status", ws) : "/api/status"); }
   catch (e) {
     $("pMode").textContent = "offline";
     $("pMode").className = "pill bad";
     note(e.message + (String(e.message).indexOf("X-API-Key") >= 0
-      ? "  →  This is this app's own password, not a broker credential. " +
+      ? "  →  This is Saidarshan's own dashboard password, not a broker credential. " +
         "Read it with:  grep MATHERAN_API_KEY .env   then paste it top-right and press Use. " +
-        "Or generate a fresh one from the Setup tab."
+        "Or generate a fresh one in System settings."
       : ""));
     STATUS_NOTE = true;
     return;
@@ -3330,9 +4438,14 @@ async function refresh() {
   // Only clear what this poll put up. A message from a button press (an order that
   // was refused, say) stays until the next action instead of vanishing in seconds.
   if (STATUS_NOTE) { note(""); STATUS_NOTE = false; }
+  LAST_STATUS = st;
   SETTINGS_MODE = st.mode;
-  RISK = st.risk || {};
-  HAS_RULES = st.has_exit_rules !== false;
+  // Risk defaults for the order dialog belong to the workspace on screen; an answer
+  // for one the page has left is not used for them.
+  if (ACTIVE.ws === ws) {
+    RISK = st.risk || {};
+    HAS_RULES = st.has_exit_rules !== false;
+  }
   $("pMode").textContent = st.mode.toUpperCase() + (st.mode === "live" ? " · REAL ORDERS" : " · simulated");
   $("pMode").className = "pill " + (st.mode === "live" ? "live" : "paper");
   $("pBroker").textContent = st.broker + (st.data_source && st.data_source !== st.broker
@@ -3347,23 +4460,30 @@ async function refresh() {
   $("dirty").hidden = !st.broker_restart_required;
   $("dataErr").hidden = !st.data_api_error;
   if (st.data_api_error) $("dataErrMsg").textContent = st.data_api_error;
-  $("tab-setup").querySelector(".dot")?.remove();
-  if (st.broker_restart_required || !st.authenticated) {
-    $("tab-setup").insertAdjacentHTML("beforeend", '<span class="dot" aria-hidden="true"></span>');
-  }
+  // Something global needs attention: a dot on the System link, which says why.
+  const sys = $("sysLink");
+  sys.querySelector(".dot")?.remove();
+  const why = st.broker_restart_required ? "the broker settings changed and need applying"
+    : !st.authenticated ? "no dashboard password is set" : "";
+  if (why) sys.insertAdjacentHTML("beforeend", '<span class="dot" aria-hidden="true"></span>');
+  sys.setAttribute("aria-label", why ? `System: ${why}` : "System settings");
   if (st.last_tick_error) { note("Last engine tick failed: " + st.last_tick_error); STATUS_NOTE = true; }
+  if (TAB === "setup" && ACTIVE.ws === ws) renderGlobalSummary();
 
+  // Only the view on screen is refreshed, for its own workspace.
+  if (ACTIVE.ws !== ws || gen !== NAV_GEN) return;
   if (TAB === "trade") loadTrade();
   if (TAB === "journal") loadJournal();
-  if (TAB === "baskets") loadBaskets();
+  if (TAB === "basket") loadBaskets();
+  if (TAB === "system") loadLegacy();
 }
 
 /* ------------------------------------------------------------------- boot */
 fillTfSelects();
-const initial = (location.hash || "").replace("#", "");
-showTab(TABS.indexOf(initial) >= 0 ? initial : "trade");
+showView(parseAppPath(location.pathname) || {}, "replace");
+loadWorkspaces();
 refresh();
-setInterval(refresh, 7000);
+setInterval(() => { if (!document.hidden) refresh(); }, 7000);
 </script>
 </body>
 </html>

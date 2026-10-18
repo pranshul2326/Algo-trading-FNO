@@ -9,6 +9,8 @@
   --warn-bg:#241f0d; --error-bg:#2b1417; --ok-bg:#12301c; --selected:#1b2a44;
   --table-head:#1f3a5f; --call-row:#0f2f2c; --put-row:#2a1633; --total-row:#2a2f36;
   --itm:#1d2530;
+  /* Text for buy / ok and sell / error on the panel background. */
+  --buy-ink:#8ee29e; --sell-ink:#ffb3b3;
 }
 :root[data-theme="light"] {
   --bg:#f4f7fa; --panel:#ffffff; --panel2:#eef3f7; --line:#c6d0da;
@@ -20,6 +22,7 @@
   --warn-bg:#fff8c5; --error-bg:#ffebe9; --ok-bg:#dafbe1; --selected:#ddf0ff;
   --table-head:#dbeafe; --call-row:#daf7f1; --put-row:#f4e8ff; --total-row:#e8eef4;
   --itm:#e7eef5; --cebar:rgba(207,34,46,.16); --pebar:rgba(26,127,55,.16);
+  --buy-ink:#116329; --sell-ink:#a40e26;
 }
 
 html { background:var(--bg); color-scheme:dark; }
@@ -49,6 +52,7 @@ tr.ready td { background:var(--row-ready) !important; }
 td.itm { background:var(--itm) !important; }
 td.strike { background:var(--panel2) !important; }
 tr.atm td.strike, tr[style*="#182b40"] { background:var(--row-atm) !important; }
+:root[data-theme="light"] tr.atm td.strike { color:var(--text) !important; }
 tr.spotrow td { background:var(--panel) !important; }
 .theme-picker { display:flex; flex-direction:column; gap:3px; color:var(--muted); font-size:11px; white-space:nowrap; }
 .theme-picker select { min-width:76px; }
@@ -76,3 +80,15 @@ tr.str-atm { background:var(--row-atm) !important; }
 :root[data-theme="light"] .tag.lu { background:#fff8c5 !important; color:#765400 !important; border-color:#d4a72c !important; }
 :root[data-theme="light"] .tag.sb { background:#ffebe9 !important; color:#a40e26 !important; border-color:#ff8182 !important; }
 :root[data-theme="light"] .tag.sc { background:#ddf4ff !important; color:#0550ae !important; border-color:#54aeff !important; }
+
+/* Light theme: text that the pages colour for a dark background (pale green and pale
+   red) would vanish on a light one, so it takes the theme's buy / sell ink instead. */
+:root[data-theme="light"] .ferr,
+:root[data-theme="light"] .ordbody .err,
+:root[data-theme="light"] .scunis .err,
+:root[data-theme="light"] .errbox,
+:root[data-theme="light"] .rulebox.bad { color:var(--sell-ink) !important; }
+:root[data-theme="light"] .okbox { color:var(--buy-ink) !important; }
+/* Price change on the shaded in-the-money cells keeps a 4.5:1 contrast. */
+:root[data-theme="light"] td.itm .up, :root[data-theme="light"] td.itm.up { color:var(--buy-ink) !important; }
+:root[data-theme="light"] td.itm .down, :root[data-theme="light"] td.itm.down { color:var(--sell-ink) !important; }

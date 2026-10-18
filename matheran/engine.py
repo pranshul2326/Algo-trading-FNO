@@ -64,6 +64,7 @@ from .models import (
     new_id,
     round_to_tick,
 )
+from . import workspaces as ws_mod
 from .rules import RulesOutcome, effective_rules, explain, live_series, needs_live
 from .store import Store
 from .strategy import Indicators, evaluate_entry, exit_outcome
@@ -135,10 +136,21 @@ class Engine:
                 if (
                     watch.position is not None
                     and watch.state is WatchState.IN_POSITION
-                    and self.cfg.risk.place_stop_at_broker
+                    and self._risk(watch).place_stop_at_broker
                 ):
                     await self._place_broker_stop(watch)
         self._task = asyncio.create_task(self._run(), name="matheran-engine")
+
+    # ------------------------------------------------------- scoped settings
+    # One engine and one set of calculations; only the settings they read are scoped.
+    # A watch reads its workspace's strategy and risk (deep copies of the top-level
+    # sections until that workspace saves its own); a legacy watch no workspace owns
+    # reads the top-level sections, exactly as before.
+    def _strategy(self, watch: Watch | None):
+        return self.cfg.strategy_for(ws_mod.of_watch(watch) if watch is not None else None)
+
+    def _risk(self, watch: Watch | None):
+        return self.cfg.risk_for(ws_mod.of_watch(watch) if watch is not None else None)
 
     def _restore_simulated_positions(self) -> list[Watch]:
         """Put back the paper positions this process was managing before it stopped.
@@ -311,17 +323,63 @@ class Engine:
 
         A long risks a fall, so its stop is below and target above; a short is the
         mirror. Keeping this in one place is what stops a sign error from silently
-        arming a stop on the wrong side of the entry.
+        arming a stop on the wrong side of the entry. A stop or target the watch was
+        given as a price is used as it is (see _level_problem for the side check).
         """
         tick = watch.instrument.tick_size
         sign = watch.direction.sign
-        stop = round_to_tick(reference * (1 - sign * watch.stop_loss_pct / 100.0), tick)
-        target = (
-            round_to_tick(reference * (1 + sign * watch.target_pct / 100.0), tick)
-            if watch.target_pct
-            else None
-        )
+        if watch.stop_loss_price:
+            stop = round_to_tick(float(watch.stop_loss_price), tick)
+        else:
+            stop = round_to_tick(reference * (1 - sign * watch.stop_loss_pct / 100.0), tick)
+        if watch.target_price:
+            target = round_to_tick(float(watch.target_price), tick)
+        elif watch.target_pct:
+            target = round_to_tick(reference * (1 + sign * watch.target_pct / 100.0), tick)
+        else:
+            target = None
         return stop, target
+
+    @staticmethod
+    def _level_problem(
+        watch: Watch, reference: float, stop: float, target: float | None
+    ) -> str:
+        """Why these levels cannot be used for an entry near `reference`, or "".
+
+        Only a level given as a price can be on the wrong side: a % is always measured
+        away from the entry. An entry past its own stop would be closed at once, and
+        one past its target would be a round trip, so no approval is raised for it.
+        """
+        sign = watch.direction.sign
+        side = "below" if sign > 0 else "above"
+        if watch.stop_loss_price and (reference - stop) * sign <= 0:
+            return (f"the stop {stop:.2f} is not {side} the price {reference:.2f} for a "
+                    f"{watch.direction.value}")
+        if watch.target_price and target is not None and (target - reference) * sign <= 0:
+            other = "above" if sign > 0 else "below"
+            return (f"the target {target:.2f} is not {other} the price {reference:.2f} for a "
+                    f"{watch.direction.value}")
+        return ""
+
+    @staticmethod
+    def _watch_stop(watch: Watch) -> tuple[float, str]:
+        """The watch's own stop as (value, unit): a price when it was given one."""
+        if watch.stop_loss_price:
+            return float(watch.stop_loss_price), "price"
+        return float(watch.stop_loss_pct), "pct"
+
+    @staticmethod
+    def _watch_target(watch: Watch) -> tuple[float | None, str]:
+        """The watch's own target as (value or None, unit)."""
+        if watch.target_price:
+            return float(watch.target_price), "price"
+        return (float(watch.target_pct) if watch.target_pct else None), "pct"
+
+    def _exit_timeframe(self, watch: Watch) -> int:
+        """The candles a watch's exit conditions read: its workspace's exit timeframe
+        (Strategy tab), else the watch's own timeframe, as before that setting."""
+        minutes = self._strategy(watch).exit_timeframe_minutes
+        return int(minutes) if minutes else watch.timeframe_minutes
 
     @staticmethod
     def _ticket_levels(
@@ -406,7 +464,7 @@ class Engine:
         """A position on the watch's own settings: its stop and target %, the Strategy
         tab's trailing profit, and the watch's product and exit mode."""
         stop, target_price = self._levels(watch, fill)
-        unit, value, trigger = self._config_trail()
+        unit, value, trigger = self._config_trail(watch)
         return Position(
             instrument=watch.instrument,
             quantity=quantity,
@@ -424,22 +482,23 @@ class Engine:
             product=watch.product,
         )
 
-    def _config_trail(self) -> tuple[str | None, float | None, float | None]:
+    def _config_trail(self, watch: Watch | None = None) -> tuple[str | None, float | None, float | None]:
         """The Strategy tab's trailing profit as (unit, distance, trigger %), if set."""
-        r = self.cfg.risk
+        r = self._risk(watch)
         if r.trail_profit_value and r.trail_profit_trigger_pct:
             return r.trail_profit_unit, float(r.trail_profit_value), float(r.trail_profit_trigger_pct)
         return None, None, None
 
     def exit_mode_for(self, watch: Watch) -> str:
         """How the watch's signalled trades exit: its own setting, else the default."""
-        return watch.exit_mode or self.cfg.risk.exit_mode
+        return watch.exit_mode or self._risk(watch).exit_mode
 
     def _check_trade_settings(
-        self, instrument: Instrument, sides: str, product: str, exit_mode: str
+        self, instrument: Instrument, sides: str, product: str, exit_mode: str,
+        strategy=None,
     ) -> None:
         """Refuse product and exit combinations that cannot work. `sides` is LONG,
-        SHORT or BOTH."""
+        SHORT or BOTH; `strategy` is the owning workspace's (the top-level by default)."""
         if product not in PRODUCTS:
             raise EngineError("product must be INTRADAY or DELIVERY")
         if exit_mode not in EXIT_MODES:
@@ -449,7 +508,7 @@ class Engine:
                 "a short sale of shares cannot be carried as delivery; use INTRADAY to sell "
                 "short, or trade the future or options for a carried short"
             )
-        if exit_mode == "strategy" and not effective_rules(self.cfg.strategy):
+        if exit_mode == "strategy" and not effective_rules(strategy or self.cfg.strategy):
             raise EngineError(
                 "'exit conditions only' needs at least one exit condition on the Strategy "
                 "tab; with none, nothing but a manual exit would close the trade"
@@ -478,6 +537,8 @@ class Engine:
         timeframe_minutes: int | None = None,
         stop_loss_pct: float | None = None,
         target_pct: float | None = None,
+        stop_loss_price: float | None = None,
+        target_price: float | None = None,
         kind: str = "equity",
         direction: Direction | str = Direction.LONG,
         basket_id: str | None = None,
@@ -488,6 +549,7 @@ class Engine:
         product: str | None = None,
         exit_mode: str | None = None,
         candle_type: str | None = None,
+        workspace: str | None = None,
     ) -> Watch:
         if quantity <= 0:
             raise EngineError("quantity must be a positive number of shares/units")
@@ -499,22 +561,45 @@ class Engine:
         sides = direction.value if isinstance(direction, Direction) else str(direction).upper()
         if sides not in {"LONG", "SHORT", "BOTH"}:
             raise EngineError("direction must be LONG, SHORT or BOTH")
-        product = str(product or self.cfg.engine.default_product).upper()
+        for name, level in (("stop", stop_loss_price), ("target", target_price)):
+            if level is not None and not float(level) > 0:
+                raise EngineError(f"a {name} price must be above 0")
+        if sides == "BOTH" and (stop_loss_price or target_price):
+            raise EngineError(
+                "a stop or target given as a price needs a LONG or SHORT watch: one price "
+                "cannot sit below a long entry and above a short one. Use % for BOTH."
+            )
+        try:
+            owner = ws_mod.for_new(workspace, instrument, sides, basket_id)
+        except ValueError as exc:
+            raise EngineError(str(exc)) from None
+        # The owner's settings fill whatever the caller left blank; a watch no
+        # workspace owns (an old API client trading a future) reads the top level.
+        s = self.cfg.strategy_for(owner)
+        r = self.cfg.risk_for(owner)
+        product = str(
+            product or self.cfg.defaults_for(owner).get("product")
+            or self.cfg.engine.default_product
+        ).upper()
         exit_mode = str(exit_mode or "").lower()
         self._check_trade_settings(
-            instrument, sides, product, exit_mode or self.cfg.risk.exit_mode
+            instrument, sides, product, exit_mode or r.exit_mode, strategy=s
         )
 
-        s = self.cfg.strategy
         watch = Watch(
             id=new_id("w"),
             instrument=instrument,
             quantity=int(quantity),
             timeframe_minutes=int(timeframe_minutes or s.timeframe_minutes),
             stop_loss_pct=float(
-                stop_loss_pct if stop_loss_pct is not None else self.cfg.risk.stop_loss_pct
+                stop_loss_pct if stop_loss_pct is not None else r.stop_loss_pct
             ),
-            target_pct=target_pct if target_pct is not None else self.cfg.risk.target_pct,
+            # A target given as a price replaces the % one; the stop % stays as the
+            # fallback the charts page and the tickets read.
+            target_pct=(None if target_price else
+                        target_pct if target_pct is not None else r.target_pct),
+            stop_loss_price=float(stop_loss_price) if stop_loss_price else None,
+            target_price=float(target_price) if target_price else None,
             kind=kind,
             # A two-way watch starts out long; it flips to whichever side signals.
             direction=Direction.SHORT if sides == "SHORT" else Direction.LONG,
@@ -528,6 +613,7 @@ class Engine:
             basket_id=basket_id,
             product=product,
             exit_mode=exit_mode,
+            workspace=owner,
         )
         if watch.timeframe_minutes not in WATCH_TIMEFRAMES:
             raise EngineError(
@@ -547,19 +633,22 @@ class Engine:
                 None,
             )
             if duplicate is not None:
+                # One watch per instrument across every workspace: the broker holds one
+                # position per contract, so two owners could not both be right.
                 raise EngineError(
-                    f"{instrument.symbol} is already being watched (watch {duplicate.id})"
+                    f"{instrument.symbol} is already being watched (watch {duplicate.id}, "
+                    f"{ws_mod.label_of(ws_mod.of_watch(duplicate))})"
                 )
             self.watches[watch.id] = watch
             self._persist()
 
         log.info(
-            "engine: watching %s %s qty=%d tf=%s sl=%.2f%% %s exit=%s%s",
+            "engine: watching %s %s qty=%d tf=%s sl=%s %s exit=%s%s",
             instrument.symbol,
             watch.sides,
             watch.quantity,
             code_of(watch.timeframe_minutes),
-            watch.stop_loss_pct,
+            f"{watch.stop_loss_price:.2f}" if watch.stop_loss_price else f"{watch.stop_loss_pct:.2f}%",
             watch.product,
             self.exit_mode_for(watch),
             " (manual entries only)" if watch.manual_only else "",
@@ -590,7 +679,7 @@ class Engine:
         for side in self.sides_of(watch):
             signal = evaluate_entry(
                 ind,
-                self.cfg.strategy,
+                self._strategy(watch),
                 ltp=ltp,
                 require_adx=watch.require_adx,
                 adx_min=watch.adx_min,
@@ -960,13 +1049,13 @@ class Engine:
         else:
             series = await load_series(
                 self.broker, watch.instrument, minutes,
-                bars=max(150, 3 * self.cfg.strategy.warmup_bars()), now=self.now(),
+                bars=max(150, 3 * self._strategy(watch).warmup_bars()), now=self.now(),
             )
         return drop_forming(series, minutes, self.now(), segment)
 
     async def _indicators(self, watch: Watch, today: date) -> Indicators:
         closed, _forming = await self._candles(watch, watch.timeframe_minutes, today)
-        return Indicators(apply_candle_type(closed, watch.candle_type), self.cfg.strategy)
+        return Indicators(apply_candle_type(closed, watch.candle_type), self._strategy(watch))
 
     async def _look_for_entry(self, watch: Watch, ltp: float | None, today: date) -> None:
         if watch.trades_today >= self.cfg.engine.max_trades_per_day:
@@ -1016,6 +1105,11 @@ class Engine:
             return
 
         stop_price, target_price = self._levels(watch, reference)
+        if self.exit_mode_for(watch) != "strategy":
+            problem = self._level_problem(watch, reference, stop_price, target_price)
+            if problem:
+                watch.notes = f"{prefix}signal, but {problem}: no approval raised"
+                return
 
         approval = Approval(
             id=new_id("appr"),
@@ -1032,6 +1126,7 @@ class Engine:
             expires_at=self.now() + timedelta(seconds=self.cfg.engine.approval_ttl_seconds),
             product=watch.product,
             exit_mode=self.exit_mode_for(watch),
+            workspace=ws_mod.of_watch(watch),
         )
         self.approvals[approval.id] = approval
         watch.approval_id = approval.id
@@ -1259,7 +1354,7 @@ class Engine:
             except BrokerError as exc:
                 log.error("engine: immediate stop exit failed for %s: %s", watch.id, exc)
             return
-        if self.cfg.risk.place_stop_at_broker:
+        if self._risk(watch).place_stop_at_broker:
             await self._place_broker_stop(watch)
 
     async def _place_broker_stop(self, watch: Watch) -> None:
@@ -1326,7 +1421,7 @@ class Engine:
                             stop_state.status.value)
                 position.stop_order_id = None
                 position.broker_stop_price = None
-                if self._market_open() and self.cfg.risk.place_stop_at_broker:
+                if self._market_open() and self._risk(watch).place_stop_at_broker:
                     await self._place_broker_stop(watch)
 
         now = self.now()
@@ -1338,7 +1433,7 @@ class Engine:
         if position.product == "DELIVERY" and not self._market_open():
             # Carried overnight. Exits resume at the open; an order sent now would be
             # refused, and resent on every tick.
-            if position.price_exits and position.stop_order_id is None and self.cfg.risk.place_stop_at_broker:
+            if position.price_exits and position.stop_order_id is None and self._risk(watch).place_stop_at_broker:
                 watch.notes = "delivery: market closed; the stop is placed again at the open"
             else:
                 watch.notes = "delivery: market closed; exits resume at the open"
@@ -1373,7 +1468,7 @@ class Engine:
             position.product == "DELIVERY"
             and position.price_exits
             and position.stop_order_id is None
-            and self.cfg.risk.place_stop_at_broker
+            and self._risk(watch).place_stop_at_broker
             and position.broker_stop_price is None
             and not watch.last_error
         ):
@@ -1398,29 +1493,32 @@ class Engine:
         Candle-close rows see closed candles only, and only those that closed after the
         position opened. Live rows see the forming candle too, priced at LTP.
         """
-        rules = effective_rules(self.cfg.strategy)
+        strategy = self._strategy(watch)
+        rules = effective_rules(strategy)
         if not rules:
             return RulesOutcome(
                 False, [], "holding: no exit conditions set; stop, target and square-off only"
             ), None
         position = watch.position
+        # A chart order keeps the chart's timeframe; everything else reads the
+        # workspace's exit timeframe, at this check (as it reads the rows themselves).
         minutes = (
             position.exit_timeframe
             if position is not None and position.exit_timeframe
-            else watch.timeframe_minutes
+            else self._exit_timeframe(watch)
         )
         closed, forming = await self._candles(watch, minutes, today)
         live = live_series(closed, forming, ltp) if needs_live(rules) else None
         outcome = exit_outcome(
             closed,
-            self.cfg.strategy,
+            strategy,
             watch.direction,
             live=live,
             entry_time=position.entry_time if position is not None else None,
             timeframe_minutes=minutes,
             segment=watch.instrument.segment,
         )
-        snapshot = Indicators(closed, self.cfg.strategy).snapshot(ltp) if outcome.fired else None
+        snapshot = Indicators(closed, strategy).snapshot(ltp) if outcome.fired else None
         return outcome, snapshot
 
     async def _maybe_trail_stop(self, watch: Watch, ltp: float) -> None:
@@ -1458,7 +1556,7 @@ class Engine:
             "trailing profit" if position.trail_trigger_pct else "trailing stop",
             old, candidate, best,
         )
-        if not self.cfg.risk.place_stop_at_broker:
+        if not self._risk(watch).place_stop_at_broker:
             return
         step = max(tick, distance * 0.25)
         if (
@@ -1499,7 +1597,7 @@ class Engine:
                 return
             position.stop_order_id = None
             position.broker_stop_price = None
-        if self.cfg.risk.place_stop_at_broker:
+        if self._risk(watch).place_stop_at_broker:
             await self._place_broker_stop(watch)
 
     async def _maybe_move_stop_to_breakeven(self, watch: Watch, ltp: float) -> None:
@@ -1508,7 +1606,7 @@ class Engine:
         Only ever moves the stop up, and re-places the resting broker order so the
         protection stays real rather than living only in this process.
         """
-        trigger = self.cfg.risk.breakeven_trigger_pct
+        trigger = self._risk(watch).breakeven_trigger_pct
         position = watch.position
         if not trigger or position is None:
             return
@@ -1673,6 +1771,9 @@ class Engine:
             exit_snapshot=snapshot,
             exit_note=note,
             product=position.product,
+            # The owning workspace, so the row stays in its journal whatever happens to
+            # the watch later; "legacy" for an old watch no workspace owns.
+            workspace=ws_mod.of_watch(watch),
         )
         self.store.append_trade(trade)
 
@@ -1710,6 +1811,11 @@ class Engine:
         limit_price: float | None = None,
         product: str | None = None,
         exit_mode: str | None = None,
+        sl_value: float | None = None,
+        sl_unit: str | None = None,
+        target_value: float | None = None,
+        target_unit: str | None = None,
+        target_given: bool = False,
     ) -> dict:
         """Enter immediately, skipping the signal.
 
@@ -1722,12 +1828,17 @@ class Engine:
         `order_type` MARKET goes out at market; LIMIT rests at `limit_price` until the
         price comes to it, and is cancelled at the no-new-entry cutoff (intraday) or the
         close (delivery) if still unfilled. `product` (INTRADAY / DELIVERY) and
-        `exit_mode` (both / sl_target / strategy) default to the watch's own. The stop
-        and target are the watch's percentages, measured from the fill.
+        `exit_mode` (both / sl_target / strategy) default to the watch's own.
+
+        The stop and target are the watch's own (a % measured from the fill, or a
+        price), unless this order gives its own: `sl_value` with `sl_unit` "pct" or
+        "price"; `target_value` with `target_unit`, where `target_given` with no value
+        means no target for this order. Both are checked against the entry before
+        anything is sent.
         """
-        if not self.cfg.risk.allow_manual_buy:
-            raise EngineError("manual entry is disabled (risk.allow_manual_buy)")
         watch = self.watches.get(watch_id)
+        if not self._risk(watch).allow_manual_buy:
+            raise EngineError("manual entry is disabled (risk.allow_manual_buy)")
         if watch is None:
             raise EngineError(f"no such watch: {watch_id}")
         if watch.position is not None:
@@ -1768,7 +1879,8 @@ class Engine:
             raise EngineError("order type must be MARKET or LIMIT")
         product = str(product or watch.product).upper()
         mode = str(exit_mode or self.exit_mode_for(watch)).lower()
-        self._check_trade_settings(watch.instrument, wanted.value, product, mode)
+        self._check_trade_settings(watch.instrument, wanted.value, product, mode,
+                                   strategy=self._strategy(watch))
         limit: float | None = None
         if kind == "LIMIT":
             if not limit_price or limit_price <= 0:
@@ -1791,24 +1903,44 @@ class Engine:
             raise EngineError("no price available to size the stop; refusing to trade blind")
         reference = float(limit if limit is not None else ltp)
 
+        # This order's stop and target, else the watch's own.
+        def unit_of(raw: str | None) -> str:
+            unit = str(raw or "pct").strip().lower()
+            if unit not in {"pct", "price"}:
+                raise EngineError("stop and target units must be pct or price")
+            return unit
+
+        if sl_value:
+            stop_value, stop_unit = float(sl_value), unit_of(sl_unit)
+        else:
+            stop_value, stop_unit = self._watch_stop(watch)
+        if target_given:
+            goal_value = float(target_value) if target_value else None
+            goal_unit = unit_of(target_unit)
+        else:
+            goal_value, goal_unit = self._watch_target(watch)
+
         # The order carries its own exits, so a limit that fills later, or after a
         # restart, still gets the stop, target, trail, product and exit mode chosen now.
-        trail_unit, trail_value, trail_trigger = self._config_trail()
+        # The exit conditions are the watch's own, so they read its workspace's exit
+        # timeframe when they are checked (no timeframe of the order's own). The
+        # trailing profit is the watch's workspace's, as for a signalled entry.
+        trail_unit, trail_value, trail_trigger = self._config_trail(watch)
         ticket = TradeTicket(
             direction=wanted,
             quantity=watch.quantity,
             order_type=kind,
             limit_price=limit,
-            sl_value=watch.stop_loss_pct,
-            sl_unit="pct",
+            sl_value=stop_value,
+            sl_unit=stop_unit,
             trail_value=trail_value,
             trail_unit=trail_unit or "pct",
             trail_trigger_pct=trail_trigger,
-            target_value=watch.target_pct,
-            target_unit="pct",
+            target_value=goal_value,
+            target_unit=goal_unit,
             exit_mode=mode,
             product=product,
-            timeframe_minutes=watch.timeframe_minutes,
+            timeframe_minutes=None,
             note=note,
         )
         stop_price, target_price = self._ticket_levels(
@@ -1925,6 +2057,7 @@ class Engine:
             status="approved",
             decided_at=now,
             note=note,
+            workspace=ws_mod.of_watch(watch),
         )
         self.approvals[approval.id] = approval
         return approval
@@ -1988,6 +2121,7 @@ class Engine:
         timeframe_minutes: int = 5,
         kind: str = "equity",
         chart_symbol: str = "",
+        workspace: str | None = None,
     ) -> dict:
         """A manual order from the charts page: market, limit, or a GTT held here.
 
@@ -1996,9 +2130,27 @@ class Engine:
         the manual Buy button has still applies: halt, market hours and the
         no-new-entry cutoff (for a GTT, checked when it fires), and the position and
         per-day caps. An instrument without a watch gets one that never raises
-        approvals of its own.
+        approvals of its own, owned by `workspace` (the chart it was placed from).
         """
-        if not self.cfg.risk.allow_manual_buy:
+        try:
+            requested = ws_mod.normalize(workspace)
+        except ValueError as exc:
+            raise EngineError(str(exc)) from None
+        existing = self._watch_for(instrument)
+        if existing is not None and requested and ws_mod.of_watch(existing) != requested:
+            # Trading another workspace's watch from here would move its position and
+            # journal rows under this workspace's settings.
+            raise EngineError(
+                f"{instrument.symbol} is watched in "
+                f"{ws_mod.label_of(ws_mod.of_watch(existing))} (watch {existing.id}); trade "
+                "it there, or remove that watch first"
+            )
+        owner = requested or (
+            ws_mod.of_watch(existing) if existing is not None
+            else ws_mod.for_new(None, instrument, ticket.direction.value)
+        )
+        risk = self.cfg.risk_for(owner)
+        if not risk.allow_manual_buy:
             raise EngineError("manual orders are disabled (risk.allow_manual_buy)")
         if self.halted:
             raise EngineError(f"engine is halted: {self.halt_reason}")
@@ -2044,7 +2196,8 @@ class Engine:
         ticket.product = str(ticket.product or "INTRADAY").upper()
         ticket.exit_mode = str(ticket.exit_mode or "both").lower()
         self._check_trade_settings(
-            instrument, ticket.direction.value, ticket.product, ticket.exit_mode
+            instrument, ticket.direction.value, ticket.product, ticket.exit_mode,
+            strategy=self.cfg.strategy_for(owner),
         )
         ticket.timeframe_minutes = int(timeframe_minutes)
         tick = instrument.tick_size
@@ -2084,7 +2237,13 @@ class Engine:
             reference = float(ticket.limit_price or ticket.trigger_price)
 
         existing = self._watch_for(instrument)
-        default_stop = existing.stop_loss_pct if existing else self.cfg.risk.stop_loss_pct
+        if existing is not None and requested and ws_mod.of_watch(existing) != requested:
+            raise EngineError(
+                f"{instrument.symbol} is watched in "
+                f"{ws_mod.label_of(ws_mod.of_watch(existing))} (watch {existing.id}); trade "
+                "it there, or remove that watch first"
+            )
+        default_stop = existing.stop_loss_pct if existing else risk.stop_loss_pct
         stop, target = self._ticket_levels(instrument, default_stop, ticket, reference)
         price_exits = ticket.exit_mode != "strategy"
         if price_exits:
@@ -2132,6 +2291,7 @@ class Engine:
                 manual_only=True,
                 notes="manual order from the charts page",
                 product=ticket.product,
+                workspace=requested,
             )
             created = True
 
@@ -2349,7 +2509,7 @@ class Engine:
         entry, entry_side = self._entry_signal(watch, ind, ltp)
         # The same evaluation an open position gets, including live rows.
         outcome, _snapshot = await self._exit_rules_outcome(watch, today, ltp)
-        rules = effective_rules(self.cfg.strategy)
+        rules = effective_rules(self._strategy(watch))
         return {
             "watch": watch.as_dict(ltp),
             "entry_side": entry_side.value,
@@ -2363,5 +2523,6 @@ class Engine:
             },
             "timeframe_minutes": watch.timeframe_minutes,
             "closed_candles": len(ind.series),
-            "warmup_required": self.cfg.strategy.warmup_bars(),
+            "warmup_required": self._strategy(watch).warmup_bars(),
+            "workspace": ws_mod.of_watch(watch),
         }

@@ -36,7 +36,7 @@ import numpy as np
 
 from .baskets import unit_weights
 from .data_source import Bar
-from .indicators import ema, session_vwap, supertrend
+from .indicators import ema, session_vwap, session_vwap_bands, supertrend
 from .timeutil import IST
 
 RANGE_MODES = ("spot", "body", "wicks")
@@ -230,8 +230,10 @@ def combo_indicators(
     ema2: int = 21,
     st_factor: float = 3.0,
     st_atr: int = 10,
+    vwap_mult: float = 2.0,
 ) -> dict[str, list[dict]]:
-    """The script's VWAP, two EMAs and Supertrend, computed on the combo itself."""
+    """The script's VWAP, two EMAs and Supertrend, computed on the combo itself, plus
+    the Advanced VWAP Bands (upper and lower only; "vwap" stays the centerline)."""
     if not bars:
         return {}
     times = [b.time for b in bars]
@@ -241,8 +243,14 @@ def combo_indicators(
     volume = np.array([b.volume for b in bars], dtype=float)
     sessions = [datetime.fromtimestamp(t, IST).date() for t in times]
     line, direction = supertrend(high, low, close, st_atr, st_factor)
+    _center, upper, lower = session_vwap_bands(high, low, close, volume, sessions, vwap_mult)
     return {
         "vwap": _points(times, session_vwap(high, low, close, volume, sessions)),
+        "vwap_bands": [
+            {"time": t, "upper": round(float(u), 4), "lower": round(float(lo), 4)}
+            for t, u, lo in zip(times, upper, lower)
+            if not (math.isnan(float(u)) or math.isnan(float(lo)))
+        ],
         "ema1": _points(times, ema(close, ema1)),
         "ema2": _points(times, ema(close, ema2)),
         "supertrend": [
@@ -322,6 +330,7 @@ def build(
     ema2: int = 21,
     st_factor: float = 3.0,
     st_atr: int = 10,
+    vwap_mult: float = 2.0,
 ) -> dict:
     """Combo, call basket, put basket, indicators and the leg table in one payload."""
     if mode not in RANGE_MODES:
@@ -339,7 +348,8 @@ def build(
         "combo": {
             "bars": [b.as_dict() for b in combo],
             "indicators": combo_indicators(combo, ema1=ema1, ema2=ema2,
-                                           st_factor=st_factor, st_atr=st_atr),
+                                           st_factor=st_factor, st_atr=st_atr,
+                                           vwap_mult=vwap_mult),
         },
         "call": {"bars": [b.as_dict() for b in calls]} if calls is not None else None,
         "put": {"bars": [b.as_dict() for b in puts]} if puts is not None else None,

@@ -27,6 +27,13 @@ from .timeutil import now_ist
 log = logging.getLogger(__name__)
 
 
+def _workspace(value) -> str:
+    from .workspaces import WORKSPACES
+
+    text = str(value or "").strip()
+    return text if text in WORKSPACES else ""
+
+
 @dataclass(slots=True)
 class BasketLeg:
     symbol: str                   # chart symbol id, e.g. opt:NIFTY:2026-10-06:22700:CE
@@ -73,6 +80,9 @@ class Basket:
     state: str = "draft"  # draft | armed | executed | closed
     product: str = "INTRADAY"   # INTRADAY | DELIVERY, for every leg
     exit_mode: str = ""         # both | sl_target | strategy; "" = the Strategy tab's
+    # The owning workspace (workspaces.py). "" on a basket from before workspaces,
+    # which the legacy rule gives to Option Seller; its leg watches inherit it.
+    workspace: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -90,6 +100,7 @@ class Basket:
             "chart_symbol": f"basket:{self.id}",
             "net_quantity": sum(l.sign * l.quantity for l in self.legs),
             "leg_count": len(self.legs),
+            "workspace": self.workspace,
         }
 
     @classmethod
@@ -111,6 +122,7 @@ class Basket:
             state=str(data.get("state", "draft")),
             product=str(data.get("product") or "INTRADAY").upper(),
             exit_mode=str(data.get("exit_mode") or "").lower(),
+            workspace=_workspace(data.get("workspace")),
         )
 
 
@@ -235,6 +247,7 @@ class BasketStore:
         notes: str = "",
         product: str = "INTRADAY",
         exit_mode: str = "",
+        workspace: str = "",
     ) -> Basket:
         if not legs:
             raise ValueError("a basket needs at least one leg")
@@ -268,6 +281,7 @@ class BasketStore:
             notes=notes,
             product=product,
             exit_mode=exit_mode,
+            workspace=workspace,
         )
         self.baskets[basket.id] = basket
         log.info("baskets: created %s '%s' with %d legs", basket.id, basket.name, len(legs))

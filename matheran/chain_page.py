@@ -10,7 +10,7 @@ CHAIN_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <script src="/static/ui-theme.js"></script>
-<title>Matheran option chain</title>
+<title>Option Chain · Saidarshan</title>
 <style>
   :root {
     --bg:#0f1216; --panel:#171c22; --panel2:#1c2229; --line:#2a323c; --text:#e6edf3;
@@ -42,7 +42,9 @@ CHAIN_HTML = r"""<!DOCTYPE html>
   button.danger { background:#6b2026; border-color:#8b2b32; }
   button.danger:hover:not(:disabled) { background:#7d262d; }
   button.sm { padding:1px 7px; font-size:11.5px; }
-  button.b { color:#8ee29e; } button.s { color:#ffb3b3; }
+  /* Buy / sell ink follows the theme (ui-theme.css), so B and S read on light buttons too. */
+  button.b { color:var(--buy-ink, #8ee29e); font-weight:650; }
+  button.s { color:var(--sell-ink, #ffb3b3); font-weight:650; }
   :focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
   .grow { margin-left:auto; }
   .pill { font-size:11.5px; color:var(--muted); border:1px solid var(--line);
@@ -82,7 +84,8 @@ CHAIN_HTML = r"""<!DOCTYPE html>
 
   /* Basket builder, pinned to the bottom so it stays in reach while scrolling. */
   aside.basket { position:sticky; bottom:0; z-index:15; margin-top:14px; background:var(--panel);
-    border:1px solid var(--accent); border-radius:9px; padding:9px 12px; box-shadow:0 -6px 22px #0008; }
+    border:1px solid var(--accent); border-radius:9px; padding:9px 12px;
+    box-shadow:0 -6px 22px var(--shadow, #0008); }
   aside.basket.empty { border-color:var(--line); box-shadow:none; }
   .bkhead { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .bkhead h2 { font-size:12.5px; margin:0; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
@@ -90,7 +93,7 @@ CHAIN_HTML = r"""<!DOCTYPE html>
   .bkhead label.f { flex-direction:row; align-items:center; gap:5px; font-size:12px; }
   #bkLegs td { padding:3px 7px; }
   #bkMsg { margin:6px 0 0; font-size:12.5px; }
-  #bkMsg.bad { color:#ffb3b3; } #bkMsg.ok { color:#8ee29e; }
+  #bkMsg.bad { color:var(--sell-ink, #ffb3b3); } #bkMsg.ok { color:var(--buy-ink, #8ee29e); }
 
   @media (max-width:760px) {
     header { position:static; padding:7px 8px; gap:8px; align-items:center; }
@@ -114,7 +117,7 @@ CHAIN_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>Option chain <a href="/">← console</a> <a href="/charts">charts ↗</a></h1>
+  <h1 id="pageTitle">Option chain</h1>
   <label class="f" for="und">Underlying
     <input id="und" class="und" list="undlist" autocomplete="off" spellcheck="false"
            placeholder="NIFTY" aria-describedby="undHint" />
@@ -191,7 +194,7 @@ CHAIN_HTML = r"""<!DOCTYPE html>
       <button type="button" id="bkExec" class="danger">Save &amp; execute</button>
     </div>
     <p id="bkEmpty" class="mut" style="margin:6px 0 0">Press <b>B</b> (buy) or <b>S</b> (sell)
-      on any contract to add it here. Saved baskets are listed on the console's Baskets tab,
+      on any contract to add it here. Saved baskets are listed in Option Seller › Basket,
       and can be charted with indicators like any symbol.</p>
     <div class="scroll" id="bkTable" hidden style="margin-top:8px">
       <table>
@@ -208,8 +211,21 @@ CHAIN_HTML = r"""<!DOCTYPE html>
 "use strict";
 const $ = (id) => document.getElementById(id);
 const KEY = sessionStorage.getItem("mthKey") || "";
-const STORE = "matheranChain.v1";
+/* Option Seller's chain (app shell) keeps its own preferences and basket builder; the
+   original /chain keeps the original key. The first visit copies the original. */
+const WS = (window.SAIDARSHAN_CONTEXT && window.SAIDARSHAN_CONTEXT.workspace) || null;
+const WS_STORE = window.SaidarshanStore || { key: (k) => k, migrate: () => false };
+const FIRST_VISIT = WS ? localStorage.getItem(WS_STORE.key("matheranChain.v1")) === null
+                         && localStorage.getItem("matheranChain.v1") === null : false;
+WS_STORE.migrate("matheranChain.v1");
+const STORE = WS_STORE.key("matheranChain.v1");
 const INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"];
+const wsq = (path) => (WS ? path + (path.indexOf("?") >= 0 ? "&" : "?") + "workspace=" + encodeURIComponent(WS) : path);
+/* Where the chain hands off to: the same workspace's views, or the original pages. */
+const chartsUrl = () => (WS ? "/app/" + WS.replace(/_/g, "-") + "/chart" : "/charts");
+const comboUrl = () => (WS ? "/app/" + WS.replace(/_/g, "-") + "/combo-chart" : "/combo");
+const basketsUrl = () => (WS ? "/app/" + WS.replace(/_/g, "-") + "/basket" : "/app/option-seller/basket");
+const winName = (what) => (WS ? "saidarshan-" + what + "-" + WS : "matheran" + what[0].toUpperCase() + what.slice(1));
 
 let prefs = loadPrefs();
 let DATA = null;          // last chain response
@@ -269,7 +285,7 @@ function underlyingChartId(und) {
 }
 function openCharts(symbols, tf) {
   const q = new URLSearchParams({ symbols: symbols.slice(0, 8).join(","), tf: tf || "5m" });
-  window.open("/charts?" + q.toString(), "matheranCharts");
+  window.open(chartsUrl() + "?" + q.toString(), winName("charts"));
 }
 
 /* -------------------------------------------------------------- the chain */
@@ -298,7 +314,7 @@ async function loadChain() {
       (d.errors ? ` · ${d.errors} contracts failed` : ""), d.errors > 0);
   } catch (e) {
     setStatus(e.message + (String(e.message).indexOf("X-API-Key") >= 0
-      ? "  →  open the console first and enter the dashboard password" : ""), true);
+      ? "  →  open Saidarshan (/app) first and enter the dashboard password" : ""), true);
     if (!DATA) $("chain").innerHTML = `<tr><td colspan="13" class="down" style="text-align:center">${esc(e.message)}</td></tr>`;
   } finally {
     loading = false;
@@ -521,6 +537,8 @@ async function saveBasket() {
     stop_loss_pct: sl ? Number(sl) : null,
     target_pct: tp ? Number(tp) : null,
     product: $("bkProd").value,
+    // Baskets belong to Option Seller; the original /chain names none and gets the same.
+    workspace: WS || "option_seller",
   };
   const basket = await api("/api/baskets", { method: "POST", body: JSON.stringify(body) });
   lastSaved = basket;
@@ -530,8 +548,8 @@ async function saveBasket() {
 function savedLinks(basket, legs) {
   const el = $("bkMsg");
   el.insertAdjacentHTML("beforeend", ` &nbsp; <a href="#" id="bkChart">Chart basket with indicators ↗</a>
-    &nbsp; <a href="/combo?basket=${encodeURIComponent(basket.id)}" target="matheranCombo">Combo screen ↗</a>
-    &nbsp; <a href="/#baskets">Manage on the console ↗</a>`);
+    &nbsp; <a href="${comboUrl()}?basket=${encodeURIComponent(basket.id)}" target="${winName("combo")}">Combo screen ↗</a>
+    &nbsp; <a href="${basketsUrl()}">Manage in Basket</a>`);
   $("bkChart").onclick = (ev) => { ev.preventDefault(); openCharts([basket.chart_symbol, ...legs], "5m"); };
 }
 
@@ -539,7 +557,7 @@ function savedLinks(basket, legs) {
 $("bkCombo").onclick = () => {
   if (!prefs.legs.length) return;
   const legs = prefs.legs.map((l) => `${l.symbol}@${l.side}@${l.lots}`).join(",");
-  window.open("/combo?" + new URLSearchParams({ legs, tf: "5m" }).toString(), "matheranCombo");
+  window.open(comboUrl() + "?" + new URLSearchParams({ legs, tf: "5m" }).toString(), winName("combo"));
 };
 
 $("bkSave").onclick = async () => {
@@ -578,7 +596,8 @@ $("bkExec").onclick = async () => {
     basket = await saveBasket();
     const r = await api(`/api/baskets/${basket.id}/execute`, { method: "POST",
       body: JSON.stringify({ confirm: true, order_type: ord, product: prod,
-                             limit_prices: ord === "LIMIT" ? limits : null }) });
+                             limit_prices: ord === "LIMIT" ? limits : null,
+                             workspace: WS || "option_seller" }) });
     const failed = (r.legs || []).filter((x) => x.status !== "sent");
     if (!failed.length) {
       bkMessage(`Executed "${basket.name}": ${r.sent} orders sent (${r.mode}).`, false);
@@ -636,10 +655,21 @@ async function boot() {
   if (prefs.prod) $("bkProd").value = prefs.prod;
   renderBasket();
   try {
-    const st = await api("/api/status");
+    const st = await api(wsq("/api/status"));
     MODE = st.mode;
     $("bkSl").placeholder = String((st.risk && st.risk.stop_loss_pct) || 3);
     if (!prefs.prod && st.risk && st.risk.default_product) $("bkProd").value = st.risk.default_product;
+    // A workspace's first visit starts from its Setup defaults.
+    const wd = st.workspace_defaults;
+    if (FIRST_VISIT && wd) {
+      if (wd.underlying) { prefs.und = wd.underlying; $("und").value = wd.underlying; }
+      if (wd.chain_strikes) { prefs.strikes = wd.chain_strikes; $("strikes").value = String(wd.chain_strikes); }
+      if (wd.chain_window) { prefs.window = wd.chain_window; $("win").value = String(wd.chain_window); }
+      if (wd.product && !prefs.prod) $("bkProd").value = wd.product;
+      if (wd.stop_loss_pct != null && !prefs.sl) { prefs.sl = String(wd.stop_loss_pct); $("bkSl").value = prefs.sl; }
+      if (wd.target_pct != null && !prefs.tp) { prefs.tp = String(wd.target_pct); $("bkTp").value = prefs.tp; }
+      savePrefs();
+    }
   } catch (e) { /* the chain call below reports auth problems */ }
   try {
     const d = await api("/api/options/underlyings");

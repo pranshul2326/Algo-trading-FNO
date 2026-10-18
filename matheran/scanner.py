@@ -1342,7 +1342,7 @@ class ScanManager:
         if cache.is_relative_to(cloud):
             log.info("scanner: the cache directory %s is inside a cloud-synced folder; a first "
                      "scan of the day writes about 1,000-1,500 small files there, which the "
-                     "sync client uploads. Exclude cache/ from sync, or run Matheran from a "
+                     "sync client uploads. Exclude cache/ from sync, or run Saidarshan from a "
                      "non-synced directory.", cache)
 
     async def start(self, spec: ScanSpec, *, keep_series: bool = False) -> ScanJob:
