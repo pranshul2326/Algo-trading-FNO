@@ -45,6 +45,7 @@ class StrategyConfig:
     adx_min: float | None = 20.0
     require_adx: bool = False
     entry_condition_mode: str = "state"  # state | cross
+    entry_candle_type: str = "normal"    # normal | heikin_ashi
     exit_condition_mode: str = "state"
 
     # Which indicator exits are armed. Turning both off leaves only the stop, the
@@ -247,6 +248,11 @@ def validate(cfg: Config) -> None:
         )
     if cfg.strategy.entry_condition_mode not in {"state", "cross"}:
         raise ValueError("strategy.entry_condition_mode must be 'state' or 'cross'")
+    from .candles import normalize_candle_type
+
+    cfg.strategy.entry_candle_type = normalize_candle_type(
+        cfg.strategy.entry_candle_type, "strategy.entry_candle_type"
+    )
     if cfg.strategy.exit_condition_mode not in {"state", "cross"}:
         raise ValueError("strategy.exit_condition_mode must be 'state' or 'cross'")
     from .rules import normalize_rules

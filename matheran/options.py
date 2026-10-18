@@ -10,9 +10,15 @@ from datetime import date, datetime, time, timedelta
 from typing import Iterable
 
 from .brokers.base import Broker, BrokerError
-from .candles import drop_forming, resample
+from .candles import (
+    Candle,
+    CandleSeries,
+    apply_candle_type,
+    drop_forming,
+    normalize_candle_type,
+    resample,
+)
 from .config import StrategyConfig
-from .candles import CandleSeries
 from .models import Instrument, OiStats, OptionRow, Snapshot
 from .strategy import Indicators, evaluate_entry
 from .timeframes import load_series
@@ -230,9 +236,11 @@ async def scan_chain(
     *,
     timeframe_minutes: int = 1,
     adx_min: float | None = None,
+    candle_type: str = "normal",
     day: date | None = None,
 ) -> list[OptionRow]:
     """Build the display table and evaluate the entry gate for every leg."""
+    candle_type = normalize_candle_type(candle_type)
     day = day or now_ist().date()
     instruments = [inst for inst, _ in selection.instruments]
 
@@ -270,7 +278,7 @@ async def scan_chain(
                 )
 
         closed, _forming = drop_forming(series, timeframe_minutes, now_ist(), inst.segment)
-        ind = Indicators(closed, cfg)
+        ind = Indicators(apply_candle_type(closed, candle_type), cfg)
         ltp = prices.get(inst.security_id)
         if ltp is None and closed:
             ltp = float(closed.close[-1])
@@ -550,20 +558,25 @@ async def straddle_table(
     chain: FullChain,
     *,
     timeframe_minutes: int = 1,
+    candle_type: str = "normal",
     day: date | None = None,
 ) -> dict:
     """ATM +/- seven paired CE+PE premiums with change and combo indicators.
 
-    Change is measured against the previous session's final CE+PE closes. VWAP,
+    Change is measured against the previous session's final CE+PE closes. Advanced VWAP,
     EMA and Supertrend are calculated on closed combined-premium candles; their
-    relation is evaluated against the current CE+PE quote (or latest leg closes
-    when quotes are unavailable).
+    relation is evaluated against the current CE+PE quote. Candle closes are never
+    live quotes. Live-capable execution requires fresh positive broker quotes for both
+    legs; PaperBroker may treat positive display fallbacks as paper references because
+    its orders are simulated locally. Both paths require current indicators from the
+    latest closed combined candle.
     """
     # Local imports avoid making the lightweight option-selection helpers load the
     # chart stack unless this table is actually requested.
     from .combo import ComboLeg, align, combo_bars, combo_indicators
     from .data_source import Bar
 
+    candle_type = normalize_candle_type(candle_type)
     day = day or now_ist().date()
     now = now_ist()
     instruments = list(chain.contracts.values())
@@ -593,24 +606,82 @@ async def straddle_table(
         for inst, raw, closed, error in fetched
     }
 
-    try:
-        prices = await broker.ltp(instruments)
-    except BrokerError as exc:
-        log.warning("options: straddle LTP batch failed (%s), using candle closes", exc)
-        prices = {}
+    # Keep display pricing independent from execution eligibility. Detect the concrete
+    # execution wrapper, not broker.name/data_source: an Upstox-backed PaperBroker
+    # still has an Upstox data shape, but every order remains locally simulated.
+    from .brokers import PaperBroker, find_upstox
 
-    def current_price(inst: Instrument | None) -> float | None:
+    paper_execution = isinstance(broker, PaperBroker)
+    upstox = find_upstox(broker)
+    direct_prices: dict[str, float] = {}
+    direct_quote_error = ""
+
+    # For every Upstox-backed shape, try the quote-only endpoint before considering
+    # display fallbacks. quote_ltp never falls back to candles.
+    if upstox is not None:
+        try:
+            data_keys = await asyncio.gather(
+                *(upstox.data_key_for(inst) for inst in instruments)
+            )
+            keyed_prices = await upstox.quote_ltp(instruments)
+            direct_prices = {
+                inst.security_id: float(keyed_prices[key])
+                for inst, key in zip(instruments, data_keys)
+                if key in keyed_prices
+            }
+        except (BrokerError, ValueError) as exc:
+            # Missing auth, transport/API failure, or a mapping failure closes every
+            # live-capable trade gate. Paper may later use positive display prices as
+            # simulated references because this broker cannot send a real order.
+            direct_quote_error = str(exc)
+            log.warning("options: direct Upstox straddle quotes unavailable: %s", exc)
+
+    try:
+        display_prices = await broker.ltp(instruments)
+    except BrokerError as exc:
+        log.warning("options: straddle display LTP batch failed (%s), using candles", exc)
+        display_prices = {}
+
+    if upstox is None:
+        # Other configured data brokers have a direct LTP contract here. Standalone
+        # PaperBroker is the exception: its synthetic values are paper references,
+        # never actual direct broker quotes.
+        if not (paper_execution and broker.data_broker is None):
+            direct_prices = display_prices
+
+    def current_price(inst: Instrument | None) -> tuple[float | None, str]:
+        """Return the displayed price and its market-data provenance."""
         if inst is None:
-            return None
-        quoted = prices.get(inst.security_id)
+            return None, "missing"
+        quoted = direct_prices.get(inst.security_id)
         if quoted is not None and quoted > 0:
-            return float(quoted)
+            return float(quoted), "broker_ltp"
+        display = display_prices.get(inst.security_id)
+        if display is not None and display > 0:
+            source = (
+                "synthetic_paper_price"
+                if paper_execution and broker.data_broker is None
+                else "provider_ltp_display_only"
+            )
+            return float(display), source
         record = records.get(inst.security_id, {})
         raw = record.get("raw")
-        if raw and raw.last:
-            return float(raw.last.close)
+        if raw and raw.last and raw.last.close > 0:
+            return float(raw.last.close), "latest_candle_close"
         closed = record.get("closed")
-        return float(closed.last.close) if closed and closed.last else None
+        if closed and closed.last and closed.last.close > 0:
+            return float(closed.last.close), "closed_candle_close"
+        return None, "missing"
+
+    def execution_price_source(price: float | None, quote_source: str) -> str:
+        """Classify whether a displayed price may authorize this execution broker."""
+        if price is None or price <= 0:
+            return "unavailable"
+        if quote_source == "broker_ltp":
+            return "direct_broker_quote"
+        if paper_execution:
+            return "paper_reference"
+        return "unavailable"
 
     def previous_close(inst: Instrument | None) -> float | None:
         if inst is None:
@@ -631,12 +702,53 @@ async def straddle_table(
             for c in series.candles
         ]
 
+    def condition_bars(rows: list[Bar]) -> list[Bar]:
+        """Apply the selected candle source without rounding signal values."""
+        if candle_type == "normal" or not rows:
+            return rows
+        series = CandleSeries([
+            Candle(
+                ts=datetime.fromtimestamp(row.time, IST), open=row.open, high=row.high,
+                low=row.low, close=row.close, volume=row.volume, oi=row.oi,
+            )
+            for row in rows
+        ])
+        transformed = apply_candle_type(series, candle_type)
+        return [
+            Bar(
+                time=int(row.ts.timestamp()), open=row.open, high=row.high, low=row.low,
+                close=row.close, volume=row.volume, oi=row.oi,
+            )
+            for row in transformed.candles
+        ]
+
     def relation(price: float | None, level: float | None) -> str | None:
         if price is None or level is None:
             return None
         if abs(price - level) < 1e-9:
             return "at"
         return "above" if price > level else "below"
+
+    def action_leg(inst: Instrument | None) -> dict | None:
+        """Stable option metadata used by chart and whole-straddle basket actions."""
+        if inst is None:
+            return None
+        strike = inst.strike or 0.0
+        return {
+            "security_id": inst.security_id,
+            "segment": inst.segment,
+            "symbol": inst.symbol,
+            "display_name": inst.display_name,
+            "instrument_type": inst.instrument_type,
+            "expiry": inst.expiry,
+            "strike": inst.strike,
+            "option_type": inst.option_type,
+            "lot_size": inst.lot_size,
+            "tick_size": inst.tick_size,
+            "chart_symbol": (
+                f"opt:{chain.underlying}:{inst.expiry}:{strike:g}:{inst.option_type}"
+            ),
+        }
 
     rows = []
     as_of: str | None = None
@@ -654,8 +766,23 @@ async def straddle_table(
                 if error:
                     errors.append(f"{inst.option_type}: {error}")
 
-        ce_price = current_price(ce)
-        pe_price = current_price(pe)
+        ce_price, ce_quote_source = current_price(ce)
+        pe_price, pe_quote_source = current_price(pe)
+        ce_execution_price_source = execution_price_source(ce_price, ce_quote_source)
+        pe_execution_price_source = execution_price_source(pe_price, pe_quote_source)
+        live_quotes = (
+            ce_execution_price_source == "direct_broker_quote"
+            and pe_execution_price_source == "direct_broker_quote"
+        )
+        execution_price_eligible = (
+            ce_execution_price_source != "unavailable"
+            and pe_execution_price_source != "unavailable"
+        )
+        row_execution_price_source = (
+            "direct_broker_quote" if live_quotes
+            else "paper_reference" if execution_price_eligible
+            else "unavailable"
+        )
         price = ce_price + pe_price if ce_price is not None and pe_price is not None else None
         ce_previous = previous_close(ce)
         pe_previous = previous_close(pe)
@@ -667,6 +794,8 @@ async def straddle_table(
         change_pct = change / previous * 100.0 if change is not None and previous else None
 
         combined = []
+        ce_bars: list[Bar] = []
+        pe_bars: list[Bar] = []
         indicators: dict[str, list[dict]] = {}
         if ce is not None and pe is not None:
             ce_series = records.get(ce.security_id, {}).get("closed")
@@ -683,13 +812,24 @@ async def straddle_table(
                     bar for bar in combo_bars(legs, align([ce_bars, pe_bars]), "spot")
                     if bar.time >= first_paired_time
                 ]
+                combined = condition_bars(combined)
                 indicators = combo_indicators(
                     combined, ema1=21, ema2=21, st_factor=0.618, st_atr=21
                 )
 
+        latest_time = combined[-1].time if combined else None
+        combined_candle_current = bool(
+            latest_time is not None
+            and ce_bars
+            and pe_bars
+            and ce_bars[-1].time == latest_time
+            and pe_bars[-1].time == latest_time
+        )
+
         def latest(name: str) -> dict | None:
             points = indicators.get(name) or []
-            return points[-1] if points else None
+            point = points[-1] if points else None
+            return point if point and point.get("time") == latest_time else None
 
         vwap_point = latest("vwap")
         ema_point = latest("ema2")
@@ -702,28 +842,130 @@ async def straddle_table(
             "positive" if supertrend_direction == -1
             else "negative" if supertrend_direction == 1 else None
         )
+        last_bar = combined[-1] if combined else None
         last_candle = (
-            datetime.fromtimestamp(combined[-1].time, IST).isoformat() if combined else None
+            datetime.fromtimestamp(last_bar.time, IST).isoformat() if last_bar else None
         )
         if last_candle and (as_of is None or last_candle > as_of):
             as_of = last_candle
 
+        # Signal decisions deliberately use full-precision values. Strict comparisons
+        # make equality fail closed. Non-Paper display fallbacks, row errors, a missing
+        # latest combined candle, stale/missing indicators and short history all remain
+        # AVOID. PaperBroker may use a positive displayed value as a simulated
+        # execution reference; it cannot send a real order. EMA(21) must be current
+        # even though BUY does not compare against it.
+        status = "AVOID"
+        history_ready = len(combined) >= 21
+        indicator_ready = (
+            vwap is not None and ema_21 is not None and supertrend_value is not None
+        )
+        candle_ready = combined_candle_current and last_bar is not None and all(
+            getattr(last_bar, name, None) is not None
+            for name in ("open", "high", "low", "close")
+        )
+        if (
+            ce is not None
+            and pe is not None
+            and not errors
+            and execution_price_eligible
+            and history_ready
+            and candle_ready
+            and indicator_ready
+            and price is not None
+        ):
+            if price > vwap and price > supertrend_value:
+                status = "BUY"
+            elif price < vwap and price < supertrend_value and price < ema_21:
+                status = "SELL"
+
+        ce_action = action_leg(ce)
+        pe_action = action_leg(pe)
+        trade_blockers: list[str] = []
+        if ce_action is None or pe_action is None:
+            trade_blockers.append("Both CE and PE contracts are required")
+        if errors:
+            trade_blockers.append("Row data is incomplete: " + "; ".join(errors))
+        if not execution_price_eligible:
+            missing_execution_price = [
+                label for label, source in (
+                    ("CE", ce_execution_price_source),
+                    ("PE", pe_execution_price_source),
+                ) if source == "unavailable"
+            ]
+            if paper_execution:
+                blocker = (
+                    "Positive paper reference unavailable for "
+                    + " and ".join(missing_execution_price)
+                    + "; simulated execution needs a positive displayed price"
+                )
+            else:
+                blocker = (
+                    "Direct positive broker LTP unavailable for "
+                    + " and ".join(missing_execution_price)
+                    + "; provider or candle fallback is display-only"
+                )
+            if direct_quote_error:
+                blocker += ": " + direct_quote_error
+            trade_blockers.append(blocker)
+        if not candle_ready:
+            trade_blockers.append(
+                "Latest closed combined OHLC is unavailable or not current for both legs"
+            )
+        missing_indicators = [
+            name for name, value in (
+                ("Advanced VWAP", vwap),
+                ("Supertrend", supertrend_value),
+                ("EMA(21)", ema_21),
+            ) if value is None
+        ]
+        if missing_indicators:
+            trade_blockers.append(
+                "Current latest-candle " + ", ".join(missing_indicators) + " unavailable"
+            )
+        if not history_ready:
+            trade_blockers.append("At least 21 closed combined candles are required")
+        if status == "AVOID" and not trade_blockers:
+            trade_blockers.append("Status is AVOID: strict BUY/SELL conditions are not met")
+        trade_ready = status != "AVOID" and not trade_blockers
+        trade_unavailable_reason = "; ".join(trade_blockers)
+
         rows.append({
             "strike": strike,
             "atm": strike == chain.atm_strike,
+            "ce": ce_action,
+            "pe": pe_action,
+            "ce_chart_symbol": ce_action["chart_symbol"] if ce_action else None,
+            "pe_chart_symbol": pe_action["chart_symbol"] if pe_action else None,
             "ce_ltp": round(ce_price, 2) if ce_price is not None else None,
             "pe_ltp": round(pe_price, 2) if pe_price is not None else None,
+            "ce_quote_source": ce_quote_source,
+            "pe_quote_source": pe_quote_source,
+            "ce_execution_price_source": ce_execution_price_source,
+            "pe_execution_price_source": pe_execution_price_source,
+            "execution_price_eligible": execution_price_eligible,
+            "execution_price_source": row_execution_price_source,
+            "live_quotes": live_quotes,
+            "combined_candle_current": combined_candle_current,
+            "trade_ready": trade_ready,
+            "trade_unavailable_reason": trade_unavailable_reason,
             "straddle_price": round(price, 2) if price is not None else None,
             "previous_close": round(previous, 2) if previous is not None else None,
             "change_price": round(change, 2) if change is not None else None,
             "change_pct": round(change_pct, 2) if change_pct is not None else None,
+            "close": round(last_bar.close, 2) if last_bar else None,
+            "open": round(last_bar.open, 2) if last_bar else None,
+            "high": round(last_bar.high, 2) if last_bar else None,
+            "low": round(last_bar.low, 2) if last_bar else None,
             "vwap": round(vwap, 2) if vwap is not None else None,
             "vwap_position": relation(price, vwap),
             "supertrend": round(supertrend_value, 2) if supertrend_value is not None else None,
+            "supertrend_position": relation(price, supertrend_value),
             "supertrend_direction": supertrend_direction,
             "supertrend_trend": supertrend_trend,
             "ema_21": round(ema_21, 2) if ema_21 is not None else None,
             "ema_21_position": relation(price, ema_21),
+            "status": status,
             "last_candle": last_candle,
             "error": "; ".join(errors),
         })
@@ -738,6 +980,7 @@ async def straddle_table(
         "atm_strike": chain.atm_strike,
         "strike_step": chain.strike_step,
         "timeframe_minutes": timeframe_minutes,
+        "candle_type": candle_type,
         "strikes_each_side": STRADDLE_STRIKES_EACH_SIDE,
         "requested_rows": requested_rows,
         "expires_today": chain.expires_today,

@@ -33,7 +33,15 @@ from datetime import datetime
 
 import numpy as np
 
-from .candles import Candle, CandleSeries, bar_end
+from .candles import (
+    CANDLE_TYPE_LABELS,
+    CANDLE_TYPES,
+    Candle,
+    CandleSeries,
+    apply_candle_type,
+    bar_end,
+    normalize_candle_type,
+)
 from .indicators import atr, dmi, ema, ema_of, rsi, session_vwap, sma, supertrend
 
 MAX_RULES = 12
@@ -55,7 +63,7 @@ OPERANDS: dict[str, dict] = {
     "open": {"label": "Open", "kind": "price", "params": ()},
     "high": {"label": "High", "kind": "price", "params": ()},
     "low": {"label": "Low", "kind": "price", "params": ()},
-    "vwap": {"label": "VWAP (session)", "kind": "price", "params": ()},
+    "vwap": {"label": "Advanced VWAP (session)", "kind": "price", "params": ()},
     "ema": {"label": "EMA of close", "kind": "price",
             "params": (_int("period", "Period", 21, 1, 500),)},
     "sma": {"label": "SMA of close", "kind": "price",
@@ -107,6 +115,7 @@ def catalog() -> dict:
         "comparators": [{"id": k, "label": v["label"]} for k, v in COMPARATORS.items()],
         "joins": list(JOINS),
         "on": [{"id": k, "label": v} for k, v in EVAL_ON.items()],
+        "candle_types": [{"id": k, "label": CANDLE_TYPE_LABELS[k]} for k in CANDLE_TYPES],
         "max_rules": MAX_RULES,
     }
 
@@ -209,16 +218,17 @@ def normalize_rows(
             on = str(row.get("on") or default_on).strip().lower()
         if on not in EVAL_ON:
             raise ValueError(f"{where}: 'on' must be close or live, got {on!r}")
+        candle_type = normalize_candle_type(row.get("candle_type"), f"{where}: candle_type")
         left = _operand(row.get("left"), f"{where}, left side")
         if left["ind"] == "value":
             raise ValueError(f"{where}: the left side must be an indicator; put the number on the right")
         right = _operand(row.get("right"), f"{where}, right side")
         if timeframes:
             out.append({"tf": tf, "join": "AND" if n == 1 else join, "left": left, "op": op,
-                        "right": right, "on": on})
+                        "right": right, "on": on, "candle_type": candle_type})
         else:
             out.append({"join": "AND" if n == 1 else join, "left": left, "op": op,
-                        "right": right, "on": on})
+                        "right": right, "on": on, "candle_type": candle_type})
     return out
 
 
@@ -238,6 +248,7 @@ def legacy_rules(cfg) -> list[dict]:
             "right": {"ind": "rsi_ema", "rsi": int(cfg.rsi_period),
                       "period": int(cfg.rsi_signal_exit_period)},
             "on": "close",
+            "candle_type": "normal",
         })
     if getattr(cfg, "exit_on_supertrend", True):
         rows.append({
@@ -247,6 +258,7 @@ def legacy_rules(cfg) -> list[dict]:
             "right": {"ind": "supertrend", "period": int(cfg.supertrend_period),
                       "factor": float(cfg.supertrend_factor)},
             "on": "close",
+            "candle_type": "normal",
         })
     if rows:
         rows[0]["join"] = "AND"
@@ -306,7 +318,7 @@ def describe_operand(o: dict) -> str:
     if ind in {"close", "open", "high", "low"}:
         return OPERANDS[ind]["label"]
     if ind == "vwap":
-        return "VWAP"
+        return "Advanced VWAP"
     if ind == "ema":
         return f"EMA({o['period']})"
     if ind == "sma":
@@ -330,6 +342,8 @@ def describe_operand(o: dict) -> str:
 
 def describe_rule(row: dict, *, timing: bool = True) -> str:
     tf = row.get("tf")
+    candle_type = normalize_candle_type(row.get("candle_type"))
+    candle_label = " · Heikin Ashi" if candle_type == "heikin_ashi" else ""
     if tf is not None:
         # A scanner row: its own timeframe, and on a live row the close is the price.
         live = row.get("on") == "live"
@@ -337,13 +351,13 @@ def describe_rule(row: dict, *, timing: bool = True) -> str:
         def word(o: dict) -> str:
             return "Price" if live and o["ind"] == "close" else describe_operand(o)
 
-        text = f"[{tf}] {word(row['left'])} {COMPARATORS[row['op']]['label']} {word(row['right'])}"
+        text = f"[{tf}{candle_label}] {word(row['left'])} {COMPARATORS[row['op']]['label']} {word(row['right'])}"
         if timing:
             text += " (live)" if live else " (last closed candle)"
         return text
     text = (
         f"{describe_operand(row['left'])} {COMPARATORS[row['op']]['label']} "
-        f"{describe_operand(row['right'])}"
+        f"{describe_operand(row['right'])}{' [Heikin Ashi]' if candle_label else ''}"
     )
     if timing:
         text += " (live)" if row.get("on") == "live" else " (on candle close)"
@@ -595,9 +609,7 @@ def evaluate(
     if not rules:
         return RulesOutcome(False, [], "holding: no indicator exit conditions set")
 
-    calcs = {"close": SeriesCalc(closed)}
-    if needs_live(rules):
-        calcs["live"] = SeriesCalc(live if live is not None else closed)
+    calcs: dict[tuple[str, str], SeriesCalc] = {}
 
     gate = ""
     last = closed.last
@@ -614,7 +626,14 @@ def evaluate(
         if rule["on"] == "close" and gate:
             results.append(RowResult(i, text, "close", "waiting", gate))
             continue
-        results.append(evaluate_row(i, rule, calcs[rule["on"]], text))
+        candle_type = normalize_candle_type(rule.get("candle_type"))
+        key = (rule["on"], candle_type)
+        calc = calcs.get(key)
+        if calc is None:
+            base = closed if rule["on"] == "close" else (live if live is not None else closed)
+            calc = SeriesCalc(apply_candle_type(base, candle_type))
+            calcs[key] = calc
+        results.append(evaluate_row(i, rule, calc, text))
 
     for g in groups(rules):
         if all(results[i].hit for i in g):

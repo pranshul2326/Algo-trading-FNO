@@ -5,6 +5,7 @@ CHARTS_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="/static/ui-theme.js"></script>
 <title>Matheran charts</title>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
 <style>
@@ -182,7 +183,34 @@ CHARTS_HTML = r"""<!DOCTYPE html>
   .dropbody .pp input { width:62px; padding:2px 5px; font-size:12px; }
   .dropbody .pp input.bad { border-color:var(--down); }
   .dropbody .pp select { padding:2px 5px; font-size:12px; }
+
+  body { display:flex; flex-direction:column; }
+  main { flex:1; min-height:0; height:auto; }
+  ul.sug { max-width:calc(100vw - 16px); }
+  @media (max-width:760px) {
+    header { padding:7px 8px; gap:8px; align-items:center; }
+    header > h1 { width:100%; }
+    header .grow { display:none; }
+    header label.f, header details.drop { flex:1 1 118px; min-width:0; }
+    header select, header details.drop > summary { width:100%; }
+    .tools { order:20; flex:1 1 100%; width:100%; max-width:100%; flex-wrap:nowrap;
+      overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    .tools button { min-width:44px; min-height:44px; flex:none; }
+    .tools input[type=color] { width:44px; height:44px; flex:none; }
+    main { width:100%; padding:6px; }
+    .grid .pane { min-height:360px; }
+    .bar input.sym { width:100%; flex:1 1 100%; max-width:100%; }
+    .bar select { flex:1 1 92px; max-width:100%; min-width:0; }
+    .dropbody { position:fixed; top:8px; left:8px; right:8px; width:auto; min-width:0;
+      max-height:calc(100dvh - 16px); overflow:auto; }
+    ul.sug { left:8px !important; width:calc(100vw - 16px) !important; }
+    dialog.ticket { max-height:calc(100dvh - 16px); overflow:auto; }
+    .tk { padding:12px 10px; }
+    .levels { grid-template-columns:auto minmax(0,1fr) auto minmax(80px,1fr); }
+    .levels input, .tk label.f input { max-width:100%; min-width:0; }
+  }
 </style>
+<link rel="stylesheet" href="/static/ui-theme.css" />
 </head>
 <body>
 <header>
@@ -239,6 +267,9 @@ CHARTS_HTML = r"""<!DOCTYPE html>
     <button type="button" id="drawClear" aria-label="Clear drawings"
       title="Remove every drawing on the chart you last clicked">Clear</button>
   </div>
+  <label class="theme-picker" for="themeSelect">Theme
+    <select id="themeSelect" data-theme-select><option value="night">Night</option><option value="light">Light</option></select>
+  </label>
   <div class="grow"></div>
   <span id="status" class="pill" role="status" aria-live="polite">…</span>
   <button id="reset" type="button" title="Forget saved layout and panes">Reset</button>
@@ -440,6 +471,17 @@ function setStatus(text, bad) {
   $("status").textContent = text;
   $("status").style.color = bad ? "var(--down)" : "var(--muted)";
 }
+function chartThemeOptions() {
+  const css = getComputedStyle(document.documentElement);
+  const value = (name) => css.getPropertyValue(name).trim();
+  return {
+    layout: { background: { color: value("--chart-bg") }, textColor: value("--chart-text"),
+              attributionLogo: false },
+    grid: { vertLines: { color: value("--chart-grid") }, horzLines: { color: value("--chart-grid") } },
+    rightPriceScale: { borderColor: value("--chart-border") },
+    timeScale: { borderColor: value("--chart-border") },
+  };
+}
 
 /* ------------------------------------------------------------------ colours */
 function colour(key, fallback) {
@@ -524,13 +566,13 @@ function makePane(index) {
   $("grid").appendChild(el);
 
   const host = el.querySelector(".chart");
+  const theme = chartThemeOptions();
   const chart = LWC.createChart(host, {
-    layout: { background: { color: "#171c22" }, textColor: "#9aa7b4",
-              attributionLogo: false },
-    grid: { vertLines: { color: "#222a33" }, horzLines: { color: "#222a33" } },
-    rightPriceScale: { borderColor: "#2a323c", scaleMargins: { top: 0.08, bottom: 0.26 } },
+    layout: theme.layout,
+    grid: theme.grid,
+    rightPriceScale: { ...theme.rightPriceScale, scaleMargins: { top: 0.08, bottom: 0.26 } },
     localization: { timeFormatter: istCrosshair },
-    timeScale: { borderColor: "#2a323c", timeVisible: true, secondsVisible: false,
+    timeScale: { ...theme.timeScale, timeVisible: true, secondsVisible: false,
                  rightOffset: 3, tickMarkFormatter: istTick },
     crosshair: { mode: LWC.CrosshairMode.Normal },
     autoSize: true,
@@ -1990,7 +2032,9 @@ function updatePickerSummary() {
    repainted from the bars already on screen rather than refetched. */
 function applyColours() {
   const opts = candleOptions();
+  const theme = chartThemeOptions();
   for (const pane of panes) {
+    try { pane.chart.applyOptions(theme); } catch (e) {}
     try { pane.candles.applyOptions(opts); } catch (e) {}
     if (pane.bars.length) {
       try { pane.volume.setData(pane.bars.map(volumePoint)); } catch (e) {}
@@ -2005,6 +2049,7 @@ function applyColours() {
     }
   }
 }
+window.addEventListener("matheran-theme-change", applyColours);
 
 async function loadSymbols() {
   try {

@@ -35,7 +35,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 from .brokers.base import Broker, BrokerError
-from .candles import drop_forming, resample
+from .candles import apply_candle_type, drop_forming, normalize_candle_type, resample
 from .config import Config
 from .models import (
     CASH_SEGMENTS,
@@ -487,6 +487,7 @@ class Engine:
         notes: str = "",
         product: str | None = None,
         exit_mode: str | None = None,
+        candle_type: str | None = None,
     ) -> Watch:
         if quantity <= 0:
             raise EngineError("quantity must be a positive number of shares/units")
@@ -518,6 +519,7 @@ class Engine:
             # A two-way watch starts out long; it flips to whichever side signals.
             direction=Direction.SHORT if sides == "SHORT" else Direction.LONG,
             sides=sides,
+            candle_type=normalize_candle_type(candle_type or s.entry_candle_type),
             manual_only=bool(manual_only),
             require_adx=bool(require_adx if require_adx is not None else s.require_adx),
             adx_min=adx_min if adx_min is not None else s.adx_min,
@@ -964,7 +966,7 @@ class Engine:
 
     async def _indicators(self, watch: Watch, today: date) -> Indicators:
         closed, _forming = await self._candles(watch, watch.timeframe_minutes, today)
-        return Indicators(closed, self.cfg.strategy)
+        return Indicators(apply_candle_type(closed, watch.candle_type), self.cfg.strategy)
 
     async def _look_for_entry(self, watch: Watch, ltp: float | None, today: date) -> None:
         if watch.trades_today >= self.cfg.engine.max_trades_per_day:

@@ -321,7 +321,9 @@ class DhanBroker(Broker):
             raise BrokerError(f"network error calling {endpoint}: {exc}", retryable=True) from exc
 
         if resp.status_code == 429:
-            raise BrokerError("rate limited by Dhan", code="DH-904", retryable=True)
+            raise BrokerError(
+                "rate limited by Dhan", code="DH-904", retryable=True, status=429
+            )
 
         try:
             payload = resp.json() if resp.content else {}
@@ -358,11 +360,14 @@ class DhanBroker(Broker):
                     code=code,
                 )
 
-            retryable = code in {"DH-904", "DH-908", "DH-909", "805", "800"}
+            retryable = resp.status_code >= 500 or code in {
+                "DH-904", "DH-908", "DH-909", "805", "800"
+            }
             raise BrokerError(
                 f"Dhan {endpoint} failed ({resp.status_code} {code}): {message}",
                 code=code,
                 retryable=retryable,
+                status=resp.status_code,
             )
 
         if isinstance(payload, dict) and payload.get("status") == "failed":
@@ -696,7 +701,11 @@ class DhanBroker(Broker):
 
         data = await self._request("POST", "/orders", json=payload, bucket="order")
         if not isinstance(data, dict) or not data.get("orderId"):
-            raise BrokerError(f"order placement returned no orderId: {data}")
+            raise BrokerError(
+                f"order placement returned no orderId: {data}",
+                code="ORDER_ID_MISSING",
+                retryable=True,
+            )
         status = STATUS_MAP.get(str(data.get("orderStatus", "")).upper(), OrderStatus.PENDING)
         return PlacedOrder(
             broker_order_id=str(data["orderId"]),

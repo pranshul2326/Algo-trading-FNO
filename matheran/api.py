@@ -20,7 +20,7 @@ from .baskets import BasketLeg, BasketStore, unit_weights
 from . import scanner as scanner_mod
 from .brokers import build_broker, find_upstox
 from .brokers.base import BrokerError
-from .candles import bar_end
+from .candles import bar_end, normalize_candle_type
 from .chain_page import CHAIN_HTML
 from .charts_page import CHARTS_HTML
 from .combo import ComboLeg
@@ -110,6 +110,9 @@ class TradeChoices(BaseModel):
         None, description="both = SL / target and exit conditions; sl_target = SL / target "
         "only; strategy = exit conditions only (no stop)",
     )
+    candle_type: str | None = Field(
+        None, description="normal or heikin_ashi; blank follows the Strategy entry setting",
+    )
 
     @field_validator("product")
     @classmethod
@@ -120,6 +123,11 @@ class TradeChoices(BaseModel):
     @classmethod
     def _e(cls, v: str | None) -> str | None:
         return _exit_mode(v)
+
+    @field_validator("candle_type")
+    @classmethod
+    def _c(cls, v: str | None) -> str | None:
+        return None if v is None or not str(v).strip() else normalize_candle_type(v)
 
 
 class CreateWatch(TradeChoices):
@@ -288,11 +296,69 @@ class CreateBasket(TradeChoices):
         return v
 
 
+class StraddleExecutionGuard(BaseModel):
+    """The exact Straddle recommendation that must still authorize execution."""
+
+    underlying: str = Field(..., min_length=1, max_length=40)
+    expiry: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    strike: float = Field(..., gt=0)
+    timeframe_minutes: int
+    candle_type: str = Field("normal", pattern="^(normal|heikin_ashi)$")
+    side: str = Field(..., description="Requested LONG or SHORT Straddle side")
+
+    @field_validator("underlying")
+    @classmethod
+    def _underlying(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("expiry")
+    @classmethod
+    def _expiry(cls, v: str) -> str:
+        text = v.strip()
+        try:
+            datetime.strptime(text, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("expiry must be a real YYYY-MM-DD date") from exc
+        return text
+
+    @field_validator("timeframe_minutes")
+    @classmethod
+    def _timeframe(cls, v: int) -> int:
+        if v not in timeframes.MINUTES:
+            raise ValueError(
+                "timeframe_minutes must be one of "
+                + ", ".join(str(m) for m in timeframes.MINUTES)
+            )
+        return v
+
+    @field_validator("side")
+    @classmethod
+    def _side(cls, v: str) -> str:
+        text = v.strip().upper()
+        if text not in {"LONG", "SHORT"}:
+            raise ValueError("side must be LONG or SHORT")
+        return text
+
+
 class ExecuteBasketBody(BuyBody):
-    """Execute a basket: every leg at market, or every leg as a limit order."""
+    """Execute a basket sequentially, optionally compensating a partial submission."""
 
     limit_prices: dict[str, float] | None = Field(
         None, description="LIMIT only: leg symbol -> limit price, one for every leg"
+    )
+    rollback_on_failure: bool = Field(
+        False,
+        description=(
+            "Stop after the first failed leg and attempt to cancel or exit every leg "
+            "already sent by this request, in reverse submission order"
+        ),
+    )
+    straddle_guard: StraddleExecutionGuard | None = Field(
+        None,
+        description=(
+            "Recompute this Straddle row immediately before creating watches or sending "
+            "orders; generic baskets omit it"
+        ),
     )
 
 
@@ -563,7 +629,7 @@ def create_app(
         title="Matheran trading API",
         version="0.1.0",
         description=(
-            "VWAP + RSI/EMA + Supertrend intraday engine for NSE/BSE equity and index "
+            "Advanced VWAP + RSI/EMA + Supertrend intraday engine for NSE/BSE equity and index "
             "options. Every entry waits for your explicit approval."
         ),
         lifespan=lifespan,
@@ -693,10 +759,9 @@ def create_app(
             **explain(rows),
         }
 
-    @app.get("/api/settings", tags=["settings"], dependencies=auth_local)
-    async def get_settings():
+    def _settings_payload(credentials: dict) -> dict:
         return {
-            "credentials": settings.credential_status(),
+            "credentials": credentials,
             "config": settings.config_snapshot(),
             "exit_rules": _exit_rules_payload(),
             "broker_restart_required": app.state.broker_dirty,
@@ -704,6 +769,28 @@ def create_app(
             "active_data_source": getattr(engine.broker, "data_source", engine.broker.name),
             "live_orders_supported": engine.broker.supports_live_orders,
         }
+
+    @app.get("/api/settings", tags=["settings"], dependencies=auth_local)
+    async def get_settings():
+        return _settings_payload(settings.credential_status())
+
+    @app.get("/api/settings-view", tags=["settings"], dependencies=auth)
+    async def get_settings_view():
+        """Return configuration state without secret previews or server paths."""
+        credential_status = settings.credential_status()
+        credential_status["env_file"] = "server-managed"
+        credential_status["env_file_mode"] = None
+        for group in credential_status["groups"]:
+            for field in group["fields"]:
+                field["preview"] = "configured" if field["is_set"] else None
+                field["from_env_file"] = False
+        payload = _settings_payload(credential_status)
+        # The remote read-only view must not disclose filesystem layout. Keep the
+        # trusted loopback /api/settings response unchanged for local setup work.
+        remote_config = dict(payload["config"])
+        remote_config.pop("config_file", None)
+        payload["config"] = remote_config
+        return payload
 
     @app.post("/api/strategy/exit-rules/preview", tags=["settings"], dependencies=auth)
     async def preview_exit_rules(body: ExitRulesBody):
@@ -788,6 +875,12 @@ def create_app(
     # ---------------------------------------------------------- equity watches
     @app.post("/api/watches", tags=["watches"], dependencies=auth, status_code=201)
     async def create_watch(body: CreateWatch):
+        if body.exchange.upper() == "BSE" and data_source_name(engine.broker) == "upstox":
+            raise HTTPException(
+                400,
+                "BSE watches are unavailable when Upstox is the active data source; "
+                "charting remains available. No watch was created.",
+            )
         instrument = await engine.broker.resolve_equity(body.symbol, body.exchange)
         watch = await engine.add_watch(
             instrument=instrument,
@@ -801,6 +894,7 @@ def create_app(
             notes=body.notes,
             product=body.product,
             exit_mode=body.exit_mode,
+            candle_type=body.candle_type,
         )
         return watch.as_dict()
 
@@ -934,10 +1028,11 @@ def create_app(
         underlying: str = Query(None),
         expiry: str | None = Query(None, description="YYYY-MM-DD; empty for nearest"),
         timeframe_minutes: int = Query(1),
+        candle_type: str = Query("normal", pattern="^(normal|heikin_ashi)$"),
     ):
         """ATM plus seven strikes on each side as paired CE+PE premiums.
 
-        Change is against the previous session close. VWAP, EMA(21), and
+        Change is against the previous session close. Advanced VWAP, EMA(21), and
         Supertrend(21, 0.618) are calculated on closed straddle candles.
         """
         from .options import STRADDLE_STRIKES_EACH_SIDE, straddle_table
@@ -956,7 +1051,8 @@ def create_app(
             strikes_each_side=STRADDLE_STRIKES_EACH_SIDE,
         )
         return await straddle_table(
-            engine.broker, chain, timeframe_minutes=timeframe_minutes
+            engine.broker, chain, timeframe_minutes=timeframe_minutes,
+            candle_type=candle_type,
         )
 
     @app.get("/api/options/chain", tags=["options"], dependencies=auth)
@@ -967,6 +1063,7 @@ def create_app(
         timeframe_minutes: int = Query(1),
         reference: str = Query("index", pattern="^(index|future)$"),
         adx_min: float | None = Query(None),
+        candle_type: str = Query("normal", pattern="^(normal|heikin_ashi)$"),
     ):
         name = (underlying or cfg.options.default_underlying).upper()
         selection = await select_chain(
@@ -982,6 +1079,7 @@ def create_app(
             cfg.strategy,
             timeframe_minutes=timeframe_minutes,
             adx_min=adx_min,
+            candle_type=candle_type,
         )
         table = [r.as_dict() for r in rows]
         return {
@@ -993,6 +1091,7 @@ def create_app(
             "atm_strike": selection.atm_strike,
             "strike_step": selection.strike_step,
             "timeframe_minutes": timeframe_minutes,
+            "candle_type": candle_type,
             "adx_min": adx_min if adx_min is not None else cfg.strategy.adx_min,
             "missing_legs": selection.missing,
             "expires_today": selection.expires_today,
@@ -1078,6 +1177,7 @@ def create_app(
             notes=body.notes,
             product=body.product,
             exit_mode=body.exit_mode,
+            candle_type=body.candle_type,
         )
 
     @app.post("/api/options/watches", tags=["options"], dependencies=auth, status_code=201)
@@ -1191,6 +1291,10 @@ def create_app(
         )
         if open_legs or in_flight:
             status = "open"
+        elif basket.state == "uncertain":
+            # A placement response was lost and no broker order ID is available.
+            # Local WATCHING state cannot prove that the broker is flat.
+            status = "uncertain"
         elif basket.state in {"executed", "closed"}:
             status = "closed"
         elif watch_ids:
@@ -1387,6 +1491,12 @@ def create_app(
         approval card, its own stop and exits.
         """
         basket = baskets.get(basket_id)
+        if basket.state == "uncertain":
+            raise HTTPException(
+                409,
+                "This basket has indeterminate broker order acceptance. Reconcile it in "
+                "the broker terminal before arming new entries.",
+            )
         created, reused = await _ensure_leg_watches(basket, manual_only=False)
         basket.state = "armed"
         _persist_baskets()
@@ -1411,6 +1521,121 @@ def create_app(
         _persist_baskets()
         return {"basket": basket.as_dict()}
 
+    async def _require_current_straddle(
+        basket, guard: StraddleExecutionGuard
+    ) -> None:
+        """Fail closed unless this exact canonical Straddle still authorizes the side."""
+
+        def refuse(reason: str) -> None:
+            raise HTTPException(
+                409,
+                "Straddle execution blocked: " + reason
+                + ". Refresh the Straddle table and retry; no watch or order was created.",
+            )
+
+        if basket.timeframe_minutes != guard.timeframe_minutes:
+            refuse(
+                f"basket timeframe {basket.timeframe_minutes}m no longer matches the "
+                f"requested {guard.timeframe_minutes}m signal"
+            )
+        if basket.state == "uncertain":
+            refuse(
+                "this basket has indeterminate broker acceptance; reconcile it in the "
+                "broker terminal before retrying"
+            )
+
+        from .options import straddle_table
+
+        try:
+            chain = await select_full_chain(
+                engine.broker,
+                guard.underlying,
+                expiry=guard.expiry,
+                strikes_each_side=MAX_CHAIN_STRIKES_EACH_SIDE,
+            )
+            current = await straddle_table(
+                engine.broker,
+                chain,
+                timeframe_minutes=guard.timeframe_minutes,
+                candle_type=guard.candle_type,
+            )
+        except (BrokerError, ValueError) as exc:
+            refuse(f"current market data could not be verified ({exc})")
+
+        if current.get("underlying") != guard.underlying:
+            refuse("the current underlying does not match the request")
+        if current.get("expiry") != guard.expiry:
+            refuse("the requested expiry is no longer the selected contract expiry")
+        if current.get("timeframe_minutes") != guard.timeframe_minutes:
+            refuse("the current signal timeframe does not match the request")
+        if current.get("candle_type") != guard.candle_type:
+            refuse("the current signal candle type does not match the request")
+
+        row = next(
+            (
+                item for item in current.get("rows", [])
+                if abs(float(item.get("strike", 0.0)) - guard.strike) < 1e-9
+            ),
+            None,
+        )
+        if row is None:
+            refuse("the requested strike is no longer in the current chain window")
+
+        actions = [row.get("ce"), row.get("pe")]
+        if any(not isinstance(action, dict) or not action.get("chart_symbol")
+               for action in actions):
+            refuse("the current canonical CE+PE pair is incomplete")
+        canonical = {action["chart_symbol"]: action for action in actions}
+        basket_symbols = [leg.symbol for leg in basket.legs]
+        if (
+            len(basket.legs) != 2
+            or len(canonical) != 2
+            or set(basket_symbols) != set(canonical)
+        ):
+            refuse("basket legs are not exactly the current canonical CE+PE pair")
+
+        lots: list[int] = []
+        for leg in basket.legs:
+            action = canonical[leg.symbol]
+            if leg.direction.value != guard.side:
+                refuse(
+                    f"{leg.label or leg.symbol} direction does not match requested "
+                    f"{guard.side}"
+                )
+            lot_size = max(1, int(action.get("lot_size") or 1))
+            if leg.quantity <= 0 or leg.quantity % lot_size:
+                refuse(f"{leg.label or leg.symbol} quantity is not a whole current lot")
+            lots.append(leg.quantity // lot_size)
+        if not lots or len(set(lots)) != 1:
+            refuse("the CE and PE legs no longer have matching positive lot counts")
+
+        execution_sources = {
+            row.get("ce_execution_price_source"),
+            row.get("pe_execution_price_source"),
+        }
+        if (
+            row.get("execution_price_eligible") is not True
+            or not execution_sources
+            or not execution_sources <= {"direct_broker_quote", "paper_reference"}
+        ):
+            refuse(
+                str(row.get("trade_unavailable_reason") or
+                    "current execution prices are not eligible")
+            )
+        if "paper_reference" in execution_sources:
+            from .brokers import PaperBroker
+
+            if not isinstance(engine.broker, PaperBroker):
+                refuse("paper reference prices cannot authorize a live-capable broker")
+
+        expected = "BUY" if guard.side == "LONG" else "SELL"
+        status = row.get("status") if row.get("status") in {"BUY", "SELL", "AVOID"} else "AVOID"
+        if row.get("trade_ready") is not True or status != expected:
+            reason = row.get("trade_unavailable_reason") or (
+                f"current status is {status}, not {expected} for {guard.side}"
+            )
+            refuse(str(reason))
+
     @app.post("/api/baskets/{basket_id}/execute", tags=["baskets"], dependencies=auth)
     async def execute_basket(basket_id: str, body: ExecuteBasketBody | None = None):
         """Enter every leg now, skipping the signals.
@@ -1418,9 +1643,13 @@ def create_app(
         Everything that would stop a leg part-way - halt, market hours, the position
         cap, a leg already open - is checked before the first order, because a hedged
         basket with a leg missing is a different and riskier position. Bought legs go
-        first so the hedge is in place before the sold legs need margin. Legs are then
-        attempted independently and each is reported, so a broker-side failure is
-        visible rather than silent.
+        first so the hedge is in place before the sold legs need margin. Broker orders
+        are sequential because there is no atomic multi-leg primitive.
+
+        By default broker-side failures retain the existing best-effort behavior and
+        later legs are still attempted. With `rollback_on_failure`, the first failed
+        leg stops submission and every leg already sent by this request is compensated
+        in reverse order through the engine's cancel/exit lifecycle.
 
         `order_type` LIMIT sends every leg as a limit order at its price in
         `limit_prices`; each rests until its own price comes, so the legs can fill at
@@ -1428,6 +1657,12 @@ def create_app(
         """
         body = body or ExecuteBasketBody()
         basket = baskets.get(basket_id)
+        if basket.state == "uncertain":
+            raise HTTPException(
+                409,
+                "This basket has indeterminate broker order acceptance. Reconcile it in "
+                "the broker terminal before retrying; no new order was sent.",
+            )
         product = body.product or basket.product or cfg.engine.default_product
         prices = {str(k): float(v) for k, v in (body.limit_prices or {}).items()}
         if body.order_type == "LIMIT":
@@ -1459,6 +1694,11 @@ def create_app(
         if blocked:
             raise HTTPException(400, f"cannot execute: {blocked}. No leg was sent.")
 
+        # A Straddle click carries its strategy identity. Recompute it before this
+        # endpoint creates even local watches; browser state is never authorization.
+        if body.straddle_guard is not None:
+            await _require_current_straddle(basket, body.straddle_guard)
+
         await _ensure_leg_watches(basket, manual_only=True)
         for leg in basket.legs:
             leg_watch = _leg_watch(leg)
@@ -1482,14 +1722,138 @@ def create_app(
                 + ", ".join(capped) + ". No leg was sent.",
             )
 
-        results = []
-        ordered = sorted(basket.legs, key=lambda l: 0 if l.direction is Direction.LONG else 1)
-        for leg in ordered:
-            entry = {"symbol": leg.symbol, "label": leg.label,
-                     "side": leg.direction.entry_side.value,
-                     "quantity": leg.quantity, "watch_id": leg.watch_id,
-                     "order_type": body.order_type,
-                     "limit_price": prices.get(leg.symbol) if body.order_type == "LIMIT" else None}
+        def uncertain_order_acceptance(exc: Exception) -> BrokerError | None:
+            """A retryable placement failure wrapped by enter_now may have been accepted."""
+            if not isinstance(exc, EngineError):
+                return None
+            pending = [exc.__cause__, exc.__context__]
+            seen: set[int] = set()
+            while pending:
+                cause = pending.pop()
+                if cause is None or id(cause) in seen:
+                    continue
+                seen.add(id(cause))
+                if (
+                    isinstance(cause, BrokerError)
+                    and cause.retryable
+                    and cause.status != 429
+                    and cause.code not in {"DH-904", "LOCAL_QUOTA"}
+                ):
+                    return cause
+                pending.extend([cause.__cause__, cause.__context__])
+            return None
+
+        def result_row(leg) -> dict:
+            return {
+                "symbol": leg.symbol,
+                "label": leg.label,
+                "side": leg.direction.entry_side.value,
+                "quantity": leg.quantity,
+                "watch_id": leg.watch_id,
+                "order_type": body.order_type,
+                "limit_price": (
+                    prices.get(leg.symbol) if body.order_type == "LIMIT" else None
+                ),
+            }
+
+        async def compensate(entry: dict) -> dict:
+            """Best-effort reversal through broker-aware engine operations only."""
+            watch_id = entry.get("watch_id") or ""
+            outcome = {
+                "symbol": entry.get("symbol"),
+                "label": entry.get("label"),
+                "watch_id": watch_id,
+                "actions": [],
+                "status": "failed",
+                "residual_exposure": True,
+                "errors": [],
+            }
+            if entry.get("acceptance") == "indeterminate":
+                watch = engine.watches.get(watch_id)
+                outcome.update(
+                    actions=["reconcile_broker_terminal"],
+                    exposure_state="indeterminate",
+                    errors=[entry.get("error") or "broker placement response was lost"],
+                    detail=(
+                        "Order acceptance is indeterminate: no broker order ID/state is "
+                        "known. Do not retry; reconcile orders and positions in the broker "
+                        "terminal immediately."
+                    ),
+                    watch=watch.as_dict() if watch is not None else None,
+                )
+                return outcome
+
+            watch = engine.watches.get(watch_id)
+            if watch is None:
+                outcome["errors"].append(
+                    "watch metadata is missing; inspect the broker terminal immediately"
+                )
+                outcome["detail"] = "Cannot reconcile the sent leg"
+                return outcome
+
+            if watch.state is WatchState.ENTRY_PLACED and watch.entry_order is not None:
+                outcome["actions"].append("cancel_entry")
+                try:
+                    await engine.cancel_entry(watch.id)
+                except Exception as exc:  # noqa: BLE001 - rollback must continue
+                    # A cancel race can turn the entry into a managed position. Re-read
+                    # state and exit that fill rather than treating the cancel error as
+                    # the final outcome.
+                    outcome["errors"].append(f"cancel entry: {exc}")
+                watch = engine.watches.get(watch_id)
+
+            if (
+                watch is not None
+                and watch.position is not None
+                and watch.state is not WatchState.EXIT_PLACED
+            ):
+                outcome["actions"].append("exit_position")
+                try:
+                    await engine.exit_now(watch.id)
+                except Exception as exc:  # noqa: BLE001 - rollback must continue
+                    outcome["errors"].append(f"exit position: {exc}")
+                watch = engine.watches.get(watch_id)
+
+            if watch is None:
+                outcome["errors"].append(
+                    "watch disappeared during compensation; inspect the broker terminal"
+                )
+                outcome["detail"] = "Cannot reconcile the sent leg"
+                return outcome
+
+            residual = watch.position is not None or watch.state in ACTIVE_STATES
+            outcome["residual_exposure"] = residual
+            outcome["watch"] = watch.as_dict()
+            if not residual:
+                outcome["status"] = "compensated"
+                outcome["detail"] = "Confirmed flat after cancel/exit reconciliation"
+            elif watch.state is WatchState.EXIT_PLACED:
+                outcome["status"] = "pending"
+                outcome["detail"] = (
+                    "Compensating exit is in flight; monitor Trade/Baskets until flat"
+                )
+            elif watch.state is WatchState.ENTRY_PLACED:
+                outcome["status"] = "failed" if outcome["errors"] else "pending"
+                outcome["detail"] = (
+                    "Entry may still be live; cancel or manage it immediately in Trade/Baskets"
+                )
+            else:
+                outcome["status"] = "failed"
+                outcome["detail"] = (
+                    "Position remains open; manage it immediately in Trade/Baskets"
+                )
+            return outcome
+
+        results: list[dict] = []
+        sent_entries: list[dict] = []
+        compensation_entries: list[dict] = []
+        submission_failed = 0
+        skipped = 0
+        ordered = sorted(
+            basket.legs, key=lambda leg: 0 if leg.direction is Direction.LONG else 1
+        )
+        for index, leg in enumerate(ordered):
+            entry = result_row(leg)
             try:
                 await engine.enter_now(
                     leg.watch_id,
@@ -1501,28 +1865,138 @@ def create_app(
                     exit_mode=body.exit_mode,
                 )
                 entry["status"] = "sent"
+                sent_entries.append(entry)
+                compensation_entries.append(entry)
             except (EngineError, BrokerError) as exc:
                 entry["status"] = "failed"
                 entry["error"] = str(exc)
+                submission_failed += 1
+                failed_watch = _leg_watch(leg)
+                entry["watch"] = failed_watch.as_dict() if failed_watch is not None else None
+                uncertain = uncertain_order_acceptance(exc)
+                if body.rollback_on_failure and uncertain is not None:
+                    # enter_now wraps a retryable place_order BrokerError. Without a
+                    # broker ID, local WATCHING state cannot prove rejection or flatness.
+                    entry["acceptance"] = "indeterminate"
+                    entry["exposure_detected"] = True
+                    entry["broker_error_code"] = uncertain.code
+                    compensation_entries.append(entry)
+                elif body.rollback_on_failure and _leg_busy(failed_watch):
+                    # enter_now raised after the broker had already left a known order
+                    # or position. Treat that state as exposure and compensate it too.
+                    entry["exposure_detected"] = True
+                    compensation_entries.append(entry)
             results.append(entry)
+            if entry["status"] == "failed" and body.rollback_on_failure:
+                for remaining in ordered[index + 1:]:
+                    skipped_entry = result_row(remaining)
+                    skipped_entry["status"] = "skipped"
+                    skipped_entry["error"] = (
+                        f"not sent because {leg.label or leg.symbol} failed; rollback started"
+                    )
+                    results.append(skipped_entry)
+                    skipped += 1
+                break
 
-        sent = sum(1 for r in results if r["status"] == "sent")
-        basket.state = "executed" if sent else "draft"
+        rollback_triggered = body.rollback_on_failure and submission_failed > 0
+        compensation: list[dict] = []
+        if rollback_triggered:
+            for entry in reversed(compensation_entries):
+                try:
+                    outcome = await compensate(entry)
+                except Exception as exc:  # noqa: BLE001 - attempt every prior leg
+                    watch = engine.watches.get(entry.get("watch_id") or "")
+                    outcome = {
+                        "symbol": entry.get("symbol"),
+                        "label": entry.get("label"),
+                        "watch_id": entry.get("watch_id"),
+                        "actions": ["reconcile"],
+                        "status": "failed",
+                        "residual_exposure": True,
+                        "errors": [f"unexpected compensation error: {exc}"],
+                        "detail": (
+                            "Compensation could not be completed; manage this leg "
+                            "immediately in Trade/Baskets and the broker terminal"
+                        ),
+                        "watch": watch.as_dict() if watch is not None else None,
+                    }
+                entry["compensation"] = outcome
+                compensation.append(outcome)
+
+        sent = len(sent_entries)
+        compensated = sum(1 for row in compensation if row["status"] == "compensated")
+        compensation_pending = sum(1 for row in compensation if row["status"] == "pending")
+        compensation_failed = sum(1 for row in compensation if row["status"] == "failed")
+        compensation_indeterminate = sum(
+            1 for row in compensation if row.get("exposure_state") == "indeterminate"
+        )
+        residuals = [row for row in compensation if row["residual_exposure"]]
+        rollback_complete = rollback_triggered and not residuals
+        residual_watch_ids = [row["watch_id"] for row in residuals if row.get("watch_id")]
+        rollback_error = ""
+        rollback_warning = ""
+        if compensation_indeterminate:
+            rollback_error = (
+                "CRITICAL — ORDER ACCEPTANCE INDETERMINATE: exposure may exist without "
+                "a known broker order ID. Do not retry; reconcile the broker terminal "
+                "immediately."
+            )
+        elif compensation_failed:
+            rollback_error = (
+                "CRITICAL — ROLLBACK FAILED: residual partial exposure remains. "
+                "Open Trade/Baskets and your broker terminal immediately."
+            )
+        elif compensation_pending:
+            rollback_warning = (
+                "Rollback is in flight and exposure may remain until broker confirmation. "
+                "Monitor Trade/Baskets and your broker terminal immediately."
+            )
+
+        basket.state = "uncertain" if compensation_indeterminate else (
+            "draft" if rollback_complete else (
+                "executed" if sent or compensation_entries else "draft"
+            )
+        )
         _persist_baskets()
         if sent and sent < len(results):
-            log.error(
-                "baskets: %s partially executed - %d of %d legs sent",
-                basket.id, sent, len(results),
-            )
+            message = "baskets: %s partially submitted - %d of %d legs sent"
+            if residuals:
+                log.error(message + "; residual watches=%s", basket.id, sent, len(results),
+                          ",".join(residual_watch_ids) or "unknown")
+            else:
+                log.warning(message + "; compensation confirmed flat", basket.id, sent,
+                            len(results))
+        if rollback_error:
+            log.error("baskets: %s %s", basket.id, rollback_error)
+
         return {
             "basket": basket.as_dict(),
             "legs": results,
             "sent": sent,
-            "failed": len(results) - sent,
+            "failed": submission_failed,
+            "skipped": skipped,
             "partial": 0 < sent < len(results),
             "mode": cfg.mode,
             "order_type": body.order_type,
             "product": product,
+            "rollback_on_failure": body.rollback_on_failure,
+            "rollback": {
+                "requested": body.rollback_on_failure,
+                "triggered": rollback_triggered,
+                "attempted": len(compensation),
+                "compensated": compensated,
+                "pending": compensation_pending,
+                "failed": compensation_failed,
+                "indeterminate": compensation_indeterminate,
+                "complete": rollback_complete,
+                "residual_exposure": bool(residuals),
+                "residual_watch_ids": residual_watch_ids,
+                "operator_action_required": bool(residuals),
+                "error": rollback_error,
+                "warning": rollback_warning,
+                "basket_id": basket.id,
+                "results": compensation,
+            },
         }
 
     @app.post("/api/baskets/{basket_id}/exit", tags=["baskets"], dependencies=auth)
@@ -1533,6 +2007,13 @@ def create_app(
         its hedge while the orders go through.
         """
         basket = baskets.get(basket_id)
+        if basket.state == "uncertain":
+            raise HTTPException(
+                409,
+                "This basket has indeterminate broker order acceptance and cannot be "
+                "declared flat locally. Reconcile orders and positions in the broker "
+                "terminal first.",
+            )
         results = []
         ordered = sorted(basket.legs, key=lambda l: 0 if l.direction is Direction.SHORT else 1)
         for leg in ordered:
@@ -2037,7 +2518,7 @@ def create_app(
         ),
     ):
         """A basket as the TradingView combo script draws it: the underlying, the
-        combined premium with VWAP / EMA / Supertrend, the call legs and the put legs.
+        combined premium with Advanced VWAP / EMA / Supertrend, the call legs and the put legs.
 
         Legs are weighted by lots, reduced by their common divisor, so the charts read in
         premium points. See combo.py for the arithmetic and its bar-range modes.

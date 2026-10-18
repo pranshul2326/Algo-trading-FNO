@@ -1,0 +1,24 @@
+matheran.54.252.125.60.sslip.io {
+	route {
+		@admin path /api/settings /api/settings/* /docs /docs/* /redoc /redoc/* /openapi.json
+		respond @admin "Not Found" 404
+
+		basic_auth {
+			import /etc/caddy/matheran-users
+		}
+
+		header {
+			-Server
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "DENY"
+			Referrer-Policy "no-referrer"
+		}
+
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:8787 {
+			header_up -Authorization
+			import /etc/caddy/matheran-api-header
+		}
+	}
+}

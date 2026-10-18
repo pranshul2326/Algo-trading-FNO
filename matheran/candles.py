@@ -20,6 +20,12 @@ DAY = 1440
 WEEK = 7 * DAY
 MONTH = 30 * DAY
 
+# Trading conditions support the provider's regular OHLC candles and a full-series
+# Heikin Ashi transform. ``normal`` is deliberately the default so every existing
+# config, saved watch and API client keeps its previous behaviour.
+CANDLE_TYPES = ("normal", "heikin_ashi")
+CANDLE_TYPE_LABELS = {"normal": "Normal candle", "heikin_ashi": "Heikin Ashi"}
+
 
 @dataclass(frozen=True, slots=True)
 class Candle:
@@ -96,6 +102,49 @@ class CandleSeries:
     @property
     def last(self) -> Candle | None:
         return self.candles[-1] if self.candles else None
+
+
+def normalize_candle_type(value, field: str = "candle_type") -> str:
+    """Return the canonical trading candle type, accepting common spellings."""
+    text = "normal" if value is None else str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    text = {"candles": "normal", "haikin_ashi": "heikin_ashi"}.get(text, text)
+    if text not in CANDLE_TYPES:
+        raise ValueError(f"{field} must be normal or heikin_ashi, got {value!r}")
+    return text
+
+
+def apply_candle_type(series: CandleSeries, candle_type: str | None) -> CandleSeries:
+    """Use regular candles or transform the complete series to Heikin Ashi.
+
+    The transform keeps full precision and preserves timestamps, volume and open
+    interest. Callers must pass all available history—not only the newest candle—
+    because each Heikin Ashi open depends on the previous transformed candle.
+    """
+    mode = normalize_candle_type(candle_type)
+    if mode == "normal" or not series:
+        return series
+
+    out: list[Candle] = []
+    previous_open: float | None = None
+    previous_close: float | None = None
+    for candle in series.candles:
+        close = (candle.open + candle.high + candle.low + candle.close) / 4.0
+        open_ = (
+            (candle.open + candle.close) / 2.0
+            if previous_open is None or previous_close is None
+            else (previous_open + previous_close) / 2.0
+        )
+        out.append(Candle(
+            ts=candle.ts,
+            open=open_,
+            high=max(candle.high, open_, close),
+            low=min(candle.low, open_, close),
+            close=close,
+            volume=candle.volume,
+            oi=candle.oi,
+        ))
+        previous_open, previous_close = open_, close
+    return CandleSeries(out)
 
 
 IST_OFFSET = timedelta(hours=5, minutes=30)

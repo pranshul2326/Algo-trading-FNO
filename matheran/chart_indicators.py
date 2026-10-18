@@ -4,7 +4,7 @@ This sits deliberately outside the data-source contract. Every provider returns
 OHLCV and nothing more, so indicators are computed here from whatever came back.
 Adding a broker therefore never means implementing indicators again.
 
-The strategy's own indicators (VWAP, EMA, Supertrend, RSI and its signal lines, ADX)
+The strategy's own indicators (Advanced VWAP, EMA, Supertrend, RSI and its signal lines, ADX)
 use the same functions and the same periods from the same config, so what the chart
 draws and what the engine acts on cannot drift apart. The single difference is that
 charts include the bar still forming, while the engine only ever acts on closed bars.
@@ -65,7 +65,7 @@ def _tf(key: str, label: str, default: str) -> dict:
 # line colour; an entry with `color_down` is drawn in two colours (up/down trend) and
 # the charts page offers a picker for each. `params` are edited on the charts page.
 CATALOG: tuple[dict, ...] = (
-    {"id": "vwap", "label": "VWAP (session)", "pane": 0, "overlay": True, "color": "#f2cc60",
+    {"id": "vwap", "label": "Advanced VWAP (session)", "pane": 0, "overlay": True, "color": "#f2cc60",
      "default": True},
     {"id": "ema_price", "label": "EMA(21) on price", "pane": 0, "overlay": True,
      "color": "#58a6ff", "default": True},
@@ -305,7 +305,7 @@ def compute(
     low = np.array([b.low for b in bars], dtype=float)
     close = np.array([b.close for b in bars], dtype=float)
     volume = np.array([b.volume for b in bars], dtype=float)
-    # VWAP resets per trading day, so bars are grouped by their IST date.
+    # Advanced VWAP resets per trading day, so bars are grouped by their IST date.
     sessions = [datetime.fromtimestamp(t, IST).date() for t in times]
 
     out: dict[str, list[dict]] = {}

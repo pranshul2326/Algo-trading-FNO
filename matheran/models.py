@@ -568,6 +568,8 @@ class Watch:
     # Which signals the watch acts on: LONG, SHORT, or BOTH - buy when the long
     # conditions hold, sell when their mirror image does. One position at a time.
     sides: str = "LONG"
+    # Candle source used by the fixed BUY/SELL entry conditions.
+    candle_type: str = "normal"
     # Never raise its own approvals; only enters when told to (a basket leg that is
     # executed together with its basket). Exits still run as normal.
     manual_only: bool = False
@@ -613,6 +615,7 @@ class Watch:
             "kind": self.kind,
             "direction": self.direction.value,
             "sides": self.sides,
+            "candle_type": self.candle_type,
             "manual_only": self.manual_only,
             "instrument": self.instrument.as_dict(),
             "quantity": self.quantity,

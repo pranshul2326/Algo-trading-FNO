@@ -55,13 +55,13 @@ timeframe, so a condition cannot appear and vanish inside the same bar.
 
 | # | Long (BUY) | Short (SELL) |
 |---|---|---|
-| 0 | Current price above session VWAP | below session VWAP |
+| 0 | Current price above Advanced VWAP (session) | below Advanced VWAP (session) |
 | 1 | RSI(21) above EMA(RSI(21), 21) | RSI(21) below it |
 | 2 | Price above Supertrend(21, 0.618) | price below it |
 | 3 | ADX(14) above 20 — options only by default | same (ADX has no direction) |
 
 A BOTH watch checks both columns. They cannot both hold at once, because price cannot be
-above and below VWAP together, so at most one approval is ever raised. The approval card
+above and below Advanced VWAP together, so at most one approval is ever raised. The approval card
 says BUY or SELL in so many words.
 
 **Exit** — whichever comes first:
@@ -106,7 +106,7 @@ joined with AND / OR; AND binds tighter than OR, as in Pine Script, so
 `A AND B OR C` means `(A AND B) OR C`. The tab reads the rows back in words for both
 directions before you save.
 
-Indicators: Close, Open, High, Low, VWAP, EMA, SMA, Supertrend, RSI, EMA of RSI, ADX,
+Indicators: Close, Open, High, Low, Advanced VWAP, EMA, SMA, Supertrend, RSI, EMA of RSI, ADX,
 +DI, −DI, ATR, or a plain number.
 
 Each row is checked either
@@ -165,7 +165,7 @@ Written to match TradingView (Pine v5), because that is probably what you are ey
 - `ta.atr` uses RMA, and true range on the first bar is `high − low`
 - Supertrend follows Pine's band-locking and direction-flip logic exactly; `direction == -1`
   (uptrend) is the same test as "price above supertrend"
-- VWAP uses the typical price `(H+L+C)/3`, cumulative, reset every session
+- Advanced VWAP uses the typical price `(H+L+C)/3`, cumulative, reset every session
 - Feeding RSI into an EMA skips the NaN prefix, as Pine does with `na` series
 
 `run.py selfcheck` proves each of these against an independently written reference
@@ -199,7 +199,7 @@ spot (or the near-month future), and tabulates the ATM strike plus *N* OTM strik
 side — calls above, puts below:
 
 ```
-CONTRACT                   TYPE   STRIKE  MONEY      LTP     VWAP  >VWAP     RSI  EMA(RSI)    EMA21   SUPERT    ADX  READY
+CONTRACT                   TYPE   STRIKE  MONEY      LTP     Advanced VWAP  >Advanced VWAP     RSI  EMA(RSI)    EMA21   SUPERT    ADX  READY
 NIFTY 23250 PE               PE    23250  OTM+2   200.61   196.74    yes   68.56     62.35   199.79   200.50   32.9  READY
 ```
 
@@ -253,7 +253,7 @@ Default BUY conditions, all joined with AND (saved under `scanner:` in `config.y
 | 3 | 1D | price above Supertrend(21, 0.618) |
 | 4 | 2h | price above Supertrend(21, 0.618) |
 | 5 | 5m | price above Supertrend(21, 0.618) |
-| 6 | 15m | price above VWAP |
+| 6 | 15m | price above Advanced VWAP |
 | 7 | 15m | RSI(21) at or above EMA(RSI(21), 14) |
 
 SELL mirrors BUY with the exit-condition rules (above ↔ below, RSI levels reflected around
@@ -436,7 +436,7 @@ rupee value beside it. When every leg is on one underlying, each bar's
 high and low are the combination valued at the underlying's high and low moments:
 calls, futures and stock at their highs and puts at their lows, then the reverse. That
 gives a range the basket could actually have traded, rather than every leg's best case
-at once. VWAP, Supertrend, RSI and the rest are computed on that series.
+at once. Advanced VWAP, Supertrend, RSI and the rest are computed on that series.
 
 ### The combo screen
 
@@ -448,7 +448,7 @@ at once. VWAP, Supertrend, RSI and the rest are computed on that series.
 |  underlying spot     |  call legs           |
 +----------------------+----------------------+
 |  combined premium    |  put legs            |
-|  VWAP, EMA 1, EMA 2, |                      |
+|  Advanced VWAP, EMA 1, EMA 2, |                      |
 |  Supertrend, table   |                      |
 +----------------------+----------------------+
 ```
@@ -459,7 +459,7 @@ summed, on opposite sides differenced (unsigned); three or more are the signed n
 table's P/L keeps the real lots. **Bar range** picks how the combo's high and low are inferred:
 *Spot linked* (the default: the combo valued at the underlying's high, calls high and puts
 low, and at its low), *Body only*, or *Sum leg wicks*. The call and put charts show the CE
-and the PE legs alone, as absolute values or signed. VWAP (session), two EMAs (9, 21) and
+and the PE legs alone, as absolute values or signed. Advanced VWAP (session), two EMAs (9, 21) and
 Supertrend (factor 3, ATR 10) are computed on the combo and adjustable. The table lists
 each leg's strike, side, lots, entry, LTP and P/L, then CALLS, PUTS and TOTAL, in points
 or rupees. Entries come from the legs' open positions once the basket is executed.
@@ -619,7 +619,7 @@ run.py                      CLI: serve / selfcheck / doctor / chain / scan
 config.example.yaml          copy to config.yaml (the UI writes this file)
 .env.example                 copy to .env (or let the UI create it)
 matheran/
-  indicators.py              VWAP, RSI, EMA, RMA, ATR, Supertrend, ADX  (TradingView semantics)
+  indicators.py              Advanced VWAP, RSI, EMA, RMA, ATR, Supertrend, ADX  (TradingView semantics)
   candles.py                 candle model, epoch normalisation, resampling (minutes to months), bar close times
   timeframes.py              the timeframe table, and loading candles at any of them (recent feed + history)
   chart_types.py             Heikin Ashi and Renko
@@ -661,7 +661,7 @@ HTTP and settings layers were also verified and all passed:
 
 | Suite | Checks | Covers |
 |---|---|---|
-| selfcheck | 80 | indicators vs an independent reference implementation (ZEMA included), resampling into minutes, hours, days, weeks and months, bar close times, Heikin Ashi, Renko, basket premium weights, tick rounding, 3% stop maths, VWAP with and without volume, strategy wiring, scanner rows, mirroring, sessions, cache reuse and the request budget |
+| selfcheck | 80 | indicators vs an independent reference implementation (ZEMA included), resampling into minutes, hours, days, weeks and months, bar close times, Heikin Ashi, Renko, basket premium weights, tick rounding, 3% stop maths, Advanced VWAP with and without volume, strategy wiring, scanner rows, mirroring, sessions, cache reuse and the request budget |
 | engine | 62 | full lifecycle, target/stop/indicator/square-off exits, approval expiry, rejection, market-hours and daily caps, halt, broker-stop failure, restart adoption, persistence |
 | api | 74 | auth, watch CRUD, diagnostics, options chain shape, option lot sizing, approvals, controls |
 | settings | 83 | `.env` parsing and 0600 permissions, masking, clear-vs-untouched semantics, config validation and rollback, live-mode guard, key generation taking effect immediately, broker swap refusal while in position |

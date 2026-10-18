@@ -27,7 +27,16 @@ from . import rules
 from . import timeframes as tf_table
 from .brokers import Broker, BrokerError, DhanBroker, UpstoxData, data_node, find_upstox
 from .brokers.upstox import REQUEST_TAG, UPSTOX_REQUESTS, request_pieces
-from .candles import DAY, MONTH, WEEK, CandleSeries, drop_forming, resample
+from .candles import (
+    DAY,
+    MONTH,
+    WEEK,
+    CandleSeries,
+    apply_candle_type,
+    drop_forming,
+    normalize_candle_type,
+    resample,
+)
 from .scan_data import (  # noqa: F401  (ScanBusy and the data types are re-exported)
     WINDOW,
     Budget,
@@ -226,7 +235,8 @@ def operand_word(o: dict, live: bool) -> str:
 def short_label(row: dict) -> str:
     """ "1W RSI(14) ≥ 50", "1D Price > ST(21, 0.618)": a column header."""
     live = row.get("on") == "live"
-    return (f"{row['tf']} {operand_word(row['left'], live)} {_SYMBOLS[row['op']]} "
+    candle = " HA" if normalize_candle_type(row.get("candle_type")) == "heikin_ashi" else ""
+    return (f"{row['tf']}{candle} {operand_word(row['left'], live)} {_SYMBOLS[row['op']]} "
             f"{operand_word(row['right'], live)}")
 
 
@@ -421,7 +431,8 @@ def build_plan(rows_by_side: dict[str, list[dict]], segment: str, today: date) -
     sources += intra
     refs: dict[str, list[RowRef]] = {side: [] for side in rows_by_side}
     for side, i, row, m, bars in meta:
-        local = (m < DAY and row["left"]["ind"] in SESSION_LOCAL_OPERANDS
+        local = (normalize_candle_type(row.get("candle_type")) == "normal"
+                 and m < DAY and row["left"]["ind"] in SESSION_LOCAL_OPERANDS
                  and row["right"]["ind"] in SESSION_LOCAL_OPERANDS
                  and not row["op"].startswith("crosses"))
         refs[side].append(RowRef(side, i, row, m, serving[m], local, bars))
@@ -438,9 +449,9 @@ class SymbolData:
     history: dict[str, CandleSeries]
     ltp: float | None
     close_time: time | None
-    calcs: dict[tuple[int, str, str], rules.SeriesCalc] = field(default_factory=dict)
+    calcs: dict[tuple[int, str, str, str], rules.SeriesCalc] = field(default_factory=dict)
     ltp_at: datetime | None = None          # when the quote in ltp was fetched
-    kept: dict[tuple[int, str, str], CandleSeries] = field(default_factory=dict)
+    kept: dict[tuple[int, str, str, str], CandleSeries] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -462,15 +473,18 @@ def series_for(data: SymbolData, minutes: int, scope: str) -> CandleSeries:
     return daily if minutes == DAY else resample(daily, minutes, seg)
 
 
-def calc_for(data: SymbolData, minutes: int, on: str, scope: str) -> rules.SeriesCalc:
-    key = (minutes, on, scope)
+def calc_for(
+    data: SymbolData, minutes: int, on: str, scope: str, candle_type: str = "normal"
+) -> rules.SeriesCalc:
+    candle_type = normalize_candle_type(candle_type)
+    key = (minutes, on, scope, candle_type)
     calc = data.calcs.get(key)
     if calc is None:
         series = series_for(data, minutes, scope)
         closed, forming = drop_forming(series, minutes, data.now, data.target.instrument.segment,
                                        close_time=data.close_time)
-        calc = rules.SeriesCalc(closed if on == "close" else
-                                rules.live_series(closed, forming, data.ltp))
+        selected = closed if on == "close" else rules.live_series(closed, forming, data.ltp)
+        calc = rules.SeriesCalc(apply_candle_type(selected, candle_type))
         data.calcs[key] = calc
     return calc
 
@@ -481,7 +495,8 @@ def evaluate_refs(data: SymbolData, refs: list[RowRef], scope: str) -> dict[tupl
     out: dict[tuple[str, int], RowEval | None] = {}
     for ref in refs:
         on = ref.row["on"]
-        calc = calc_for(data, ref.minutes, on, scope)
+        candle_type = normalize_candle_type(ref.row.get("candle_type"))
+        calc = calc_for(data, ref.minutes, on, scope, candle_type)
         if scope == "today" and calc.n == 0:
             out[(ref.side, ref.index)] = None
             continue
@@ -489,7 +504,7 @@ def evaluate_refs(data: SymbolData, refs: list[RowRef], scope: str) -> dict[tupl
         defined = rr.state in ("true", "false")
         out[(ref.side, ref.index)] = RowEval(rr, calc.n, scope == "full" and defined
                                              and calc.n < ref.bars)
-        data.kept[(ref.minutes, on, scope)] = calc.series
+        data.kept[(ref.minutes, on, scope, candle_type)] = calc.series
     return out
 
 
@@ -630,7 +645,7 @@ class SymbolResult:
     as_of: datetime | None
     notes: list[str]
     sides: dict[str, SideResult]
-    series: dict | None = None      # keep_series only: {(minutes, on, scope): CandleSeries}
+    series: dict | None = None      # keep_series: {(minutes, on, scope, candle_type): series}
 
     def as_dict(self) -> dict:
         t = self.target

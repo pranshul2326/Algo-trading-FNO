@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .candles import normalize_candle_type
 from .models import (
     EXIT_MODES,
     Direction,
@@ -175,6 +176,7 @@ class Store:
                     direction=Direction(str(data.get("direction", "LONG")).upper()),
                     # Records from before BOTH existed only ever traded their direction.
                     sides=_sides(data.get("sides") or data.get("direction")),
+                    candle_type=normalize_candle_type(data.get("candle_type")),
                     manual_only=bool(data.get("manual_only", False)),
                     require_adx=bool(data.get("require_adx", False)),
                     adx_min=data.get("adx_min"),

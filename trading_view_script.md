@@ -3,7 +3,7 @@
 // string that we build at runtime from the Strike / Expiry dropdowns below.
 // (In Pine v5 dynamic requests are off by default, so a concatenated symbol
 // string would be rejected as "series string".)
-indicator("Multi-Strike Option Combo + Call/Put Charts (VWAP/EMA/Supertrend)", overlay=true, max_bars_back=500, dynamic_requests=true)
+indicator("Multi-Strike Option Combo + Call/Put Charts (Advanced VWAP/EMA/Supertrend)", overlay=true, max_bars_back=500, dynamic_requests=true)
 
 // ============================================================
 // HOW STRIKE SELECTION WORKS
@@ -307,10 +307,10 @@ manMult   = input.float(1.0, "Multiply", minval=0.0001, step=0.1, inline="s1", g
 manOffs   = input.float(0.0, "Offset", step=1, inline="s1", group=grpScale)
 
 // ============================================================
-// 10. VWAP / EMA / SUPERTREND
+// 10. Advanced VWAP / EMA / SUPERTREND
 // ============================================================
 grpInd = "10. Indicators"
-showVwap = input.bool(true, "VWAP", inline="i1", group=grpInd)
+showVwap = input.bool(true, "Advanced VWAP", inline="i1", group=grpInd)
 vwapCol  = input.color(color.orange, "", inline="i1", group=grpInd)
 showEma1 = input.bool(true, "EMA 1", inline="i2", group=grpInd)
 ema1Len  = input.int(9, "", minval=1, inline="i2", group=grpInd)
@@ -694,7 +694,7 @@ plotcandle(puCandle ? putOpenP : na, puCandle ? putHighP : na, puCandle ? putLow
 plot(showPut and putStyle == "Line" ? putCloseP : na, title="Put Line", color=putLineCol, linewidth=putWidth)
 
 // ============================================================
-// VWAP (session reset) on the combo price
+// Advanced VWAP (session reset) on the combo price
 // ============================================================
 newSession = ta.change(time("D")) != 0
 var float cumPV  = 0.0
@@ -709,7 +709,7 @@ cumPV += nz(vwapSrc * comboVolume)
 cumVol += nz(comboVolume)
 vwapVal = cumVol != 0 ? cumPV / cumVol : na
 
-plot(showVwap ? vwapVal : na, title="VWAP", color=vwapCol, linewidth=2)
+plot(showVwap ? vwapVal : na, title="Advanced VWAP", color=vwapCol, linewidth=2)
 
 // ============================================================
 // EMAs

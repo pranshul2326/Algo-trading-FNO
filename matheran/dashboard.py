@@ -5,6 +5,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="/static/ui-theme.js"></script>
 <title>Matheran trading console</title>
 <style>
   :root {
@@ -172,7 +173,35 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   table.scres tbody th { color:var(--text); text-transform:none; font-size:inherit; font-weight:600; }
   #scNotes { margin:6px 0 0; padding-left:18px; }
   #scNotes:empty { display:none; }
+
+  @media (max-width:760px) {
+    header { padding:6px 8px; }
+    header > .bar { flex-wrap:nowrap; overflow-x:auto; align-items:center; gap:8px;
+      scrollbar-width:thin; -webkit-overflow-scrolling:touch; }
+    header > .bar > * { flex:none; }
+    header > .bar > .grow { margin-left:0; }
+    header > .bar .row { flex-wrap:nowrap; width:auto; }
+    header > .bar label[for="key"] { min-width:190px !important; }
+    nav[role=tablist] { flex-wrap:nowrap; overflow-x:auto; margin-top:5px;
+      scrollbar-width:thin; -webkit-overflow-scrolling:touch; }
+    nav[role=tablist] > * { flex:none; }
+    nav[role=tablist] button, nav[role=tablist] a { min-height:44px; padding:10px 12px !important; }
+    main { width:100%; max-width:100%; min-width:0; padding:8px; }
+    section.panel { padding:11px 10px; margin-bottom:10px; }
+    form.row, .row { max-width:100%; min-width:0; }
+    label.f { min-width:0; max-width:100%; }
+    input, select { max-width:100%; min-width:0; }
+    input.bksym { width:min(280px, 72vw); }
+    .grid { grid-template-columns:minmax(0,1fr); }
+    .credrow { grid-template-columns:minmax(0,1fr); align-items:stretch; }
+    .scunis { grid-template-columns:minmax(0,1fr); }
+    .opnd { min-width:max-content; }
+    dialog.ord { max-height:calc(100dvh - 16px); overflow:auto; }
+    .ordbody { padding:12px 10px; }
+    .ordbody .actions { position:sticky; bottom:0; background:var(--panel); padding-top:6px; }
+  }
 </style>
+<link rel="stylesheet" href="/static/ui-theme.css" />
 </head>
 <body>
 <header>
@@ -183,6 +212,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span id="pMarket" class="pill">…</span>
     <span id="pAuth" class="pill">…</span>
     <span id="pHalt" class="pill on" hidden>HALTED</span>
+    <label class="theme-picker" for="themeSelect">Theme
+      <select id="themeSelect" data-theme-select><option value="night">Night</option><option value="light">Light</option></select>
+    </label>
     <div class="grow row" style="align-items:center">
       <label class="f" for="key" style="min-width:230px"
              title="This app's own password (MATHERAN_API_KEY in .env). Not a Dhan or Upstox credential.">
@@ -220,7 +252,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="dataErr" class="errbox" hidden>
     <strong>No market data.</strong>
     <span id="dataErrMsg"></span>
-    <p style="margin:8px 0 0">Nothing can be computed without candles — VWAP, RSI,
+    <p style="margin:8px 0 0">Nothing can be computed without candles — Advanced VWAP, RSI,
       Supertrend and ADX all need them, so no signal will ever fire. Either subscribe to
       Dhan Data APIs (₹499 + taxes per month, under DhanHQ Trading APIs on web.dhan.co),
       or switch the broker to <strong>Paper only (synthetic data)</strong> on the Setup tab
@@ -292,12 +324,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <select id="dir">
             <option value="LONG">LONG — buy, then sell</option>
             <option value="SHORT">SHORT — sell, then buy back</option>
-            <option value="BOTH">BOTH — buy above VWAP, sell below</option>
+            <option value="BOTH">BOTH — buy above Advanced VWAP, sell below</option>
           </select>
         </label>
         <label class="f" for="qty">Quantity<input id="qty" type="number" min="1" step="1" value="1" required /></label>
         <label class="f" for="tf">Timeframe
           <select id="tf" data-tf="5"></select></label>
+        <label class="f" for="tradeCandle">Candle type
+          <select id="tradeCandle"><option value="normal">Normal candle</option>
+            <option value="heikin_ashi">Heikin Ashi</option></select></label>
         <label class="f" for="sl">Stop %<input id="sl" type="number" min="0.1" max="50" step="0.1" value="3" /></label>
         <label class="f" for="tp">Target %<input id="tp" type="number" min="0.1" step="0.1" placeholder="none" /></label>
         <label class="f" for="prod" title="Intraday is squared off at the square-off time; delivery (CNC) is carried until its exits fire">Product
@@ -317,14 +352,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="scroll">
         <table>
           <thead><tr>
-            <th class="l">Instrument</th><th class="l">Dir</th><th class="l">Kind</th><th>TF</th><th>Qty</th>
-            <th class="l">State</th><th>LTP</th><th>VWAP</th><th>RSI</th><th>EMA(RSI,21)</th>
+            <th class="l">Instrument</th><th class="l">Dir</th><th class="l">Kind</th><th>TF</th><th>Candle</th><th>Qty</th>
+            <th class="l">State</th><th>LTP</th><th>Advanced VWAP</th><th>RSI</th><th>EMA(RSI,21)</th>
             <th>Supertrend</th><th>ADX</th>
             <th title="Every entry condition satisfied on the last closed candle; hover for each condition">Ready</th>
             <th>Entry</th><th>Stop</th><th>P&amp;L</th>
             <th class="l">Note</th><th></th>
           </tr></thead>
-          <tbody id="watches"><tr><td colspan="18" class="mut">No watches yet.</td></tr></tbody>
+          <tbody id="watches"><tr><td colspan="19" class="mut">No watches yet.</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -343,7 +378,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div role="tabpanel" id="opt-panel-scan" aria-labelledby="opt-tab-scan">
       <section class="panel">
         <h2>ATM and OTM scan</h2>
-        <p class="sub">Current price, VWAP, RSI(21), EMA(RSI,21), EMA(21), Supertrend(21, 0.618)
+        <p class="sub">Current price, Advanced VWAP, RSI(21), EMA(RSI,21), EMA(21), Supertrend(21, 0.618)
           and ADX for the ATM strike plus OTM strikes on both sides. Rows highlighted green
           meet every entry condition. For open interest, OI change and the 5-minute buildup on
           every strike, open the <a href="/chain">full option chain ↗</a>.</p>
@@ -355,6 +390,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <label class="f" for="otm">OTM count<input id="otm" type="number" min="0" max="20" value="5" /></label>
           <label class="f" for="otf">Timeframe
             <select id="otf" data-tf="1"></select></label>
+          <label class="f" for="optCandle">Candle type
+            <select id="optCandle"><option value="normal">Normal candle</option>
+              <option value="heikin_ashi">Heikin Ashi</option></select></label>
           <label class="f" for="ref">ATM from
             <select id="ref"><option value="index">index spot</option><option value="future">future</option></select></label>
           <label class="f" for="amin">ADX min<input id="amin" type="number" min="0" step="1" value="20" /></label>
@@ -367,7 +405,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <table>
             <thead><tr>
               <th class="l">Contract</th><th class="l">Type</th><th>Strike</th>
-              <th>LTP</th><th>VWAP</th><th>&gt;VWAP</th><th>RSI(21)</th><th>EMA(RSI,21)</th>
+              <th>LTP</th><th>Advanced VWAP</th><th>&gt;Advanced VWAP</th><th>RSI(21)</th><th>EMA(RSI,21)</th>
               <th>EMA(21)</th><th>Supertrend</th><th>ADX</th><th>Ready</th>
               <th class="l">Blocking condition</th><th>Actions</th>
             </tr></thead>
@@ -381,9 +419,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <section class="panel">
         <h2>Straddle monitor</h2>
         <p class="sub">CE + PE premium for ATM and seven listed strikes on either side (15 rows).
-          Change is from the previous session's combined close. Above / below compares the live
-          straddle price with VWAP and EMA(21) from the latest closed combined candle; trend uses
-          Supertrend(21, 0.618).</p>
+          Change is from the previous session's combined close. Above / below compares the displayed
+          straddle price with Advanced VWAP and EMA(21) from the latest closed combined candle; trend uses
+          Supertrend(21, 0.618). Direct broker quotes are used when available; paper mode may use clearly
+          labelled reference prices for simulated execution only.</p>
         <form class="row" id="straddleForm">
           <label class="f" for="strUnd">Underlying
             <select id="strUnd"><option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option>
@@ -392,17 +431,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <select id="strExp"><option value="">nearest</option></select></label>
           <label class="f" for="strTf">Timeframe
             <select id="strTf" data-tf="1"></select></label>
+          <label class="f" for="strCandle">Candle type
+            <select id="strCandle"><option value="normal">Normal candle</option>
+              <option value="heikin_ashi">Heikin Ashi</option></select></label>
+          <label class="f" for="strLots">Lots per leg
+            <input id="strLots" type="number" min="1" step="1" value="1" inputmode="numeric" /></label>
           <button type="submit" class="go" id="btnStraddle">Scan straddles</button>
         </form>
         <p id="straddleMeta" class="sub" style="margin:11px 0 0"></p>
         <div class="scroll" style="margin-top:6px">
           <table>
             <thead><tr>
-              <th class="l">Strike</th><th>Straddle price</th><th>Change price</th>
-              <th>Change %</th><th>VWAP · above / below</th>
-              <th>Supertrend (21, 0.618)</th><th>EMA 21 · above / below</th>
+              <th class="l">Strike</th><th>Straddle price</th><th>Change</th><th>Change %</th>
+              <th>Close</th><th>Open</th><th>High</th><th>Low</th>
+              <th>Advanced VWAP</th><th>Supertrend</th><th>EMA(21)</th><th>Status</th><th>Actions</th>
             </tr></thead>
-            <tbody id="straddleRows"><tr><td colspan="7" class="mut">Press Scan straddles.</td></tr></tbody>
+            <tbody id="straddleRows"><tr><td colspan="13" class="mut">Press Scan straddles.</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -415,8 +459,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div role="tabpanel" id="p-scanner" aria-labelledby="tab-scanner" hidden>
     <section class="panel" aria-labelledby="scCondHead">
       <h2 id="scCondHead">Conditions</h2>
-      <p class="sub">A live BUY / SELL screener. It only reads market data: it never places an
-        order or creates a watch. Each row is one condition on its own timeframe, written like
+      <p class="sub">A live BUY / SELL screener. Scanning itself is read-only and never places an
+        order or creates a watch. An explicit <strong>Add to watchlist</strong> action creates a normal
+        one-share watch; it still waits for the configured watch conditions and your approval before
+        any order. Each row is one condition on its own timeframe, written like
         the exit rules on the Strategy tab. <strong>live</strong> reads the forming candle at the
         live price (as TradingView draws it); <strong>last closed candle</strong> waits for the
         close. Rows are joined by AND / OR, AND binding tighter. A row without enough history is
@@ -427,11 +473,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <caption class="sr">BUY conditions</caption>
           <thead><tr>
             <th class="l" scope="col">Join</th><th class="l" scope="col">Timeframe</th>
-            <th class="l" scope="col">Indicator</th><th class="l" scope="col">Condition</th>
+            <th class="l" scope="col">Candle type</th><th class="l" scope="col">Indicator</th>
+            <th class="l" scope="col">Condition</th>
             <th class="l" scope="col">Compared with</th><th class="l" scope="col">Checked</th>
             <th scope="col"><span class="sr">Move or remove</span></th>
           </tr></thead>
-          <tbody id="scBuyRows"><tr><td colspan="7" class="l mut">Loading…</td></tr></tbody>
+          <tbody id="scBuyRows"><tr><td colspan="8" class="l mut">Loading…</td></tr></tbody>
         </table>
       </div>
       <div class="row" style="margin-top:10px;align-items:center">
@@ -446,11 +493,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <caption class="sr">SELL conditions</caption>
           <thead><tr>
             <th class="l" scope="col">Join</th><th class="l" scope="col">Timeframe</th>
-            <th class="l" scope="col">Indicator</th><th class="l" scope="col">Condition</th>
+            <th class="l" scope="col">Candle type</th><th class="l" scope="col">Indicator</th>
+            <th class="l" scope="col">Condition</th>
             <th class="l" scope="col">Compared with</th><th class="l" scope="col">Checked</th>
             <th scope="col"><span class="sr">Move or remove</span></th>
           </tr></thead>
-          <tbody id="scSellRows"><tr><td colspan="7" class="l mut">Loading…</td></tr></tbody>
+          <tbody id="scSellRows"><tr><td colspan="8" class="l mut">Loading…</td></tr></tbody>
         </table>
       </div>
       <div class="row" style="margin-top:10px;align-items:center">
@@ -530,9 +578,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div id="scTables"><p class="mut">Run a scan to see results.</p></div>
       <p id="scFooter" class="sub" style="margin:4px 0 0"></p>
       <ul id="scNotes" class="sub"></ul>
-      <span id="scBseNote" class="sr">Opens the add-watch form. With Upstox market data, BSE
-        watches do not get candles yet (see README)</span>
-      <span id="scIsinNote" class="sr">not chartable here: listed by ISIN only</span>
     </section>
   </div>
 
@@ -540,10 +585,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div role="tabpanel" id="p-baskets" aria-labelledby="tab-baskets" hidden>
     <section class="panel">
       <h2>New basket</h2>
-      <p class="sub">A basket is a set of buy and sell legs sent together: a spread, a straddle,
-        a pair trade. Each leg becomes a watch with its own stop, so every protection still
-        applies. You can also build one from the <a href="/chain">option chain ↗</a> with its
-        B / S buttons.</p>
+      <p class="sub">A basket groups buy and sell legs for a spread, straddle or pair trade.
+        Broker legs are submitted sequentially, not atomically. Each leg becomes a watch with its
+        own stop, so every protection still applies. You can also build one from the
+        <a href="/chain">option chain ↗</a> with its B / S buttons.</p>
       <div class="row">
         <label class="f" for="bkName">Name
           <input id="bkName" maxlength="60" placeholder="e.g. bull call spread" /></label>
@@ -584,7 +629,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         difference of the leg prices in points, as the basket chart draws it.
         <strong>Exit all</strong> buys back sold legs first, then sells the bought ones.
         <strong>Watch legs</strong> lets each leg wait for its own entry signal instead.
-        <strong>Combo</strong> opens the underlying, the combined premium with VWAP, EMAs and
+        <strong>Combo</strong> opens the underlying, the combined premium with Advanced VWAP, EMAs and
         Supertrend, and the call and put legs on one 2 × 2 screen.
         <strong>Chart</strong> opens the combined basket value with indicators, beside its legs.</p>
       <div id="bkList" aria-live="polite"><p class="mut">No baskets yet.</p></div>
@@ -595,9 +640,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div role="tabpanel" id="p-strategy" aria-labelledby="tab-strategy" hidden>
     <section class="panel">
       <h2>Entry rules</h2>
-      <p class="sub">All of these must hold on the last closed candle: price above VWAP,
+      <p class="sub">All of these must hold on the last closed candle: price above Advanced VWAP,
         RSI above its 21-EMA, price above Supertrend, and ADX above the minimum for options.
-        A SHORT (sell) watch uses the mirror image: price below VWAP, RSI below its 21-EMA and
+        A SHORT (sell) watch uses the mirror image: price below Advanced VWAP, RSI below its 21-EMA and
         price below Supertrend; a BOTH watch takes whichever side lines up.
         Saved to <code>config.yaml</code> and applied to the next evaluation immediately.</p>
       <div class="grid" id="entryGrid"></div>
@@ -615,11 +660,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <table class="rules">
           <caption class="sr">Exit conditions</caption>
           <thead><tr>
-            <th class="l" scope="col">Join</th><th class="l" scope="col">Indicator</th>
+            <th class="l" scope="col">Join</th><th class="l" scope="col">Candle type</th>
+            <th class="l" scope="col">Indicator</th>
             <th class="l" scope="col">Condition</th><th class="l" scope="col">Compared with</th>
             <th class="l" scope="col">Checked</th><th scope="col"><span class="sr">Remove</span></th>
           </tr></thead>
-          <tbody id="ruleRows"><tr><td colspan="6" class="l mut">Loading…</td></tr></tbody>
+          <tbody id="ruleRows"><tr><td colspan="7" class="l mut">Loading…</td></tr></tbody>
         </table>
       </div>
       <div class="row" style="margin-top:10px;align-items:center">
@@ -732,6 +778,7 @@ let KEY = sessionStorage.getItem("mthKey") || "";
 let TAB = "trade";
 let SETTINGS = null;
 let SCAN_TIMER = null;
+let STRADDLE_DATA = null;
 let STATUS_NOTE = false;   // the message box currently shows a status-poll message
 $("key").value = KEY;
 
@@ -897,7 +944,9 @@ async function applyBroker() {
 /* ------------------------------------------------------------------ setup */
 async function loadSettings() {
   let s;
-  try { s = await api("/api/settings"); } catch (e) { note(e.message); return; }
+  const localHost = ["127.0.0.1", "localhost", "::1"].includes(location.hostname);
+  const settingsPath = localHost ? "/api/settings" : "/api/settings-view";
+  try { s = await api(settingsPath); } catch (e) { note(e.message); return; }
   SETTINGS = s;
   $("envPath").textContent = s.credentials.env_file;
   $("cfgMode").value = s.config.mode;
@@ -1007,6 +1056,8 @@ $("btnTest").onclick = async () => {
 /* --------------------------------------------------------------- strategy */
 const ENTRY_FIELDS = [
   ["strategy","timeframe_minutes","Timeframe","select",TFS.map((t) => [t.minutes, t.label])],
+  ["strategy","entry_candle_type","Candle type","select",[
+    ["normal", "Normal candle"], ["heikin_ashi", "Heikin Ashi"]]],
   ["strategy","entry_condition_mode","Entry trigger","select",["state","cross"]],
   ["strategy","adx_min","ADX minimum (options)","num",null,0.5],
   ["strategy","require_adx","Require ADX for equities too","bool"],
@@ -1176,6 +1227,14 @@ function makeRuleEditor(o) {
       </select>`;
   }
 
+  function candleCell(i, r) {
+    const selected = r.candle_type || "normal";
+    return `<select class="rct" data-row="${i}"${dis()} aria-label="${label} ${i + 1} candle type">
+      ${(cat().candle_types || [{id:"normal", label:"Normal"}]).map((x) =>
+        `<option value="${esc(x.id)}" ${x.id === selected ? "selected" : ""}>${esc(x.label)}</option>`).join("")}
+      </select>`;
+  }
+
   function lastCell(i, count) {
     if (ro()) return "";
     const moves = o.reorder
@@ -1202,6 +1261,7 @@ function makeRuleEditor(o) {
              <option value="AND" ${r.join === "AND" ? "selected" : ""}>AND</option>
              <option value="OR" ${r.join === "OR" ? "selected" : ""}>OR</option></select>`}</td>${o.timeframes ? `
       <td class="l">${tfCell(i, r)}</td>` : ""}
+      <td class="l">${candleCell(i, r)}</td>
       <td class="l">${operandCell(i, "left", r.left)}</td>
       <td class="l"><select class="rop" data-row="${i}"${dis()} aria-label="${label} ${i + 1} comparison">
         ${C.comparators.map((c) => `<option value="${esc(c.id)}" ${c.id === r.op ? "selected" : ""}>${esc(c.label)}</option>`).join("")}
@@ -1234,6 +1294,7 @@ function makeRuleEditor(o) {
     tb.querySelectorAll(".rjoin").forEach((el) => { el.onchange = () => { row(el).join = el.value; o.onChange(false); }; });
     tb.querySelectorAll(".ron").forEach((el) => { el.onchange = () => { row(el).on = el.value; o.onChange(false); }; });
     tb.querySelectorAll(".rtf").forEach((el) => { el.onchange = () => { row(el).tf = el.value; o.onChange(false); }; });
+    tb.querySelectorAll(".rct").forEach((el) => { el.onchange = () => { row(el).candle_type = el.value; o.onChange(false); }; });
     tb.querySelectorAll(".rdel").forEach((el) => {
       el.onclick = () => { o.rows().splice(Number(el.dataset.row), 1); o.onChange(true); };
     });
@@ -1263,8 +1324,8 @@ function makeRuleEditor(o) {
 
 const STRATEGY_RULES = makeRuleEditor({
   tbody: $("ruleRows"), addBtn: $("ruleAdd"), rows: () => RULES, catalog: () => RULE_CAT,
-  label: "Condition", labelLower: "condition", colspan: 6,
-  emptyHtml: `<tr><td colspan="6" class="l mut">No indicator conditions: positions close
+  label: "Condition", labelLower: "condition", colspan: 7,
+  emptyHtml: `<tr><td colspan="7" class="l mut">No indicator conditions: positions close
       on the stop, the target or the square-off only.</td></tr>`,
   onChange: (rerender) => rulesChanged(rerender),
 });
@@ -1302,7 +1363,7 @@ function showRuleText(d, err) {
 $("ruleAdd").onclick = () => {
   if (!RULE_CAT) return;
   RULES.push({ join: "OR", left: freshOperand("close"), op: "below",
-               right: freshOperand("vwap"), on: "close" });
+               right: freshOperand("vwap"), on: "close", candle_type: "normal" });
   rulesChanged(true);
 };
 $("ruleDefault").onclick = async () => {
@@ -1448,7 +1509,8 @@ $("ordForm").onsubmit = (ev) => {
     }
   }
   if (SETTINGS_MODE === "live" && !confirm(`LIVE — REAL MONEY\n\n${o.title}\n` +
-      `${limit ? "Limit" : "Market"} · ${out.product.toLowerCase()} · ${EXIT_TEXT[out.exit_mode]}\n\nSend it?`)) return;
+      `${limit ? "Limit" : "Market"} · ${out.product.toLowerCase()} · ${EXIT_TEXT[out.exit_mode]}` +
+      (o.confirmWarning ? `\n\n${o.confirmWarning}` : "") + "\n\nSend it?")) return;
   const r = ORD.resolve;
   ORD = null;
   $("ord").close();
@@ -1464,6 +1526,7 @@ $("addForm").onsubmit = async (ev) => {
     direction: $("dir").value,
     quantity: Number($("qty").value),
     timeframe_minutes: Number($("tf").value),
+    candle_type: $("tradeCandle").value,
     stop_loss_pct: Number($("sl").value) || null,
     target_pct: $("tp").value ? Number($("tp").value) : null,
     product: $("prod").value || null,
@@ -1472,8 +1535,8 @@ $("addForm").onsubmit = async (ev) => {
   try {
     await api("/api/watches", { method:"POST", body: JSON.stringify(body) });
     const how = {
-      LONG: "It asks for approval to BUY when price is above VWAP, RSI above its 21-EMA and price above Supertrend.",
-      SHORT: "It asks for approval to SELL when price is below VWAP, RSI below its 21-EMA and price below Supertrend.",
+      LONG: "It asks for approval to BUY when price is above Advanced VWAP, RSI above its 21-EMA and price above Supertrend.",
+      SHORT: "It asks for approval to SELL when price is below Advanced VWAP, RSI below its 21-EMA and price below Supertrend.",
       BOTH: "It asks to BUY when the long conditions line up and to SELL when their mirror image does — one position at a time.",
     }[body.direction];
     note(`${body.symbol} added ${body.direction}. ${how}`, "ok");
@@ -1511,7 +1574,7 @@ function renderAppr(list) {
              <span>Target <strong>${a.target_price ? n(a.target_price) : "none"}</strong></span>`}
         <span>Product <strong>${a.product === "DELIVERY" ? "delivery" : "intraday"}</strong></span>
         <span>Exit <strong>${esc(EXIT_TEXT[a.exit_mode] || EXIT_TEXT.both)}</strong></span>
-        <span>VWAP ${n(s.vwap)}</span>
+        <span>Advanced VWAP ${n(s.vwap)}</span>
         <span>RSI ${n(s.rsi)} vs ${n(s.rsi_signal_entry)}</span>
         <span>Supertrend ${n(s.supertrend)}</span>
         <span>ADX ${n(s.adx)}</span>
@@ -1610,7 +1673,7 @@ function tradeTags(w) {
 
 function renderWatches(list) {
   const tb = $("watches");
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="18" class="mut">No watches yet.</td></tr>'; return; }
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="19" class="mut">No watches yet.</td></tr>'; return; }
   tb.innerHTML = list.map((w) => {
     const s = (w.last_signal && w.last_signal.snapshot) || {};
     const p = w.position;
@@ -1625,7 +1688,8 @@ function renderWatches(list) {
             : "BOTH"}</td>`
         : dirCell(p ? w.direction : (w.sides || w.direction))}
       <td class="l">${esc(w.kind)}${w.basket_id ? '<span class="tagb" title="Leg of a basket; enter and exit it from the Baskets tab">basket</span>' : ""}${tradeTags(w)}</td>
-      <td>${esc(tfCode(w.timeframe_minutes))}</td><td>${w.quantity}</td>
+      <td>${esc(tfCode(w.timeframe_minutes))}</td>
+      <td>${w.candle_type === "heikin_ashi" ? "Heikin Ashi" : "Normal"}</td><td>${w.quantity}</td>
       <td class="l">${esc(w.state.replace(/_/g," "))}</td>
       <td>${n(p ? p.ltp : (w.ltp != null ? w.ltp : s.ltp))}</td><td>${n(s.vwap)}</td><td>${n(s.rsi)}</td>
       <td>${n(s.rsi_signal_entry)}</td><td class="${stc}">${n(s.supertrend)}</td><td>${n(s.adx)}</td>
@@ -1774,60 +1838,208 @@ async function loadStraddles() {
   const q = new URLSearchParams({
     underlying: $("strUnd").value,
     timeframe_minutes: $("strTf").value,
+    candle_type: $("strCandle").value,
   });
   if ($("strExp").value) q.set("expiry", $("strExp").value);
   $("btnStraddle").disabled = true;
   $("straddleMeta").textContent = "";
-  $("straddleRows").innerHTML = '<tr><td colspan="7" class="mut">Scanning 15 straddles…</td></tr>';
+  $("straddleRows").innerHTML = '<tr><td colspan="13" class="mut">Scanning 15 straddles…</td></tr>';
   try {
     const d = await api("/api/options/straddles?" + q.toString());
+    STRADDLE_DATA = d;
     const rows = d.rows || [];
     const incomplete = rows.filter((row) => row.error).length;
     const shortage = Math.max(0, Number(d.requested_rows || 15) - rows.length);
     $("straddleMeta").textContent =
       d.underlying + " " + d.expiry + " · spot " + n(d.spot) + " · ATM " + n(d.atm_strike, 0) +
-      " · " + tfCode(d.timeframe_minutes) + " · " + rows.length + "/" + (d.requested_rows || 15) +
+      " · " + tfCode(d.timeframe_minutes) + " · " +
+      (d.candle_type === "heikin_ashi" ? "Heikin Ashi" : "Normal candle") + " · " +
+      rows.length + "/" + (d.requested_rows || 15) +
       " strikes · closed candle " + clock(d.as_of) +
       (d.expires_today ? " · EXPIRES TODAY" : "") +
       (shortage ? " · " + shortage + " boundary strike(s) unavailable" : "") +
       (incomplete ? " · " + incomplete + " incomplete row(s)" : "");
-    renderStraddles(rows);
+    renderStraddles(d);
   } catch (e) {
+    STRADDLE_DATA = null;
     note(e.message);
-    $("straddleRows").innerHTML = '<tr><td colspan="7" class="down"></td></tr>';
+    $("straddleRows").innerHTML = '<tr><td colspan="13" class="down"></td></tr>';
     $("straddleRows").querySelector("td").textContent = e.message;
   } finally { $("btnStraddle").disabled = false; }
 }
 
 function straddleStateClass(value) {
-  if (value === "above" || value === "positive") return "up";
-  if (value === "below" || value === "negative") return "down";
+  if (value === "above" || value === "positive" || value === "BUY") return "up";
+  if (value === "below" || value === "negative" || value === "SELL") return "down";
   return "mut";
 }
-function straddleStateLabel(value) {
-  return value ? value.charAt(0).toUpperCase() + value.slice(1) : "—";
+function straddleIndicator(value, relation, label) {
+  const rel = relation ? ` <span class="${straddleStateClass(relation)}">${esc(relation)}</span>` : "";
+  const title = relation ? `${label}: current displayed straddle price is ${relation}` : `${label} unavailable`;
+  return `<span title="${esc(title)}">${n(value)}${rel}</span>`;
 }
-function renderStraddles(rows) {
+function renderStraddles(d) {
+  const rows = d.rows || [];
   const body = $("straddleRows");
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="7" class="mut">No strikes available.</td></tr>';
+    body.innerHTML = '<tr><td colspan="13" class="mut">No strikes available.</td></tr>';
     return;
   }
-  body.innerHTML = rows.map((row) => {
+  const quoteSource = (source) => ({
+    broker_ltp: "direct broker quote",
+    provider_ltp_display_only: "provider LTP fallback (display only)",
+    synthetic_paper_price: "synthetic paper price",
+    latest_candle_close: "latest candle fallback (display only)",
+    closed_candle_close: "closed candle fallback (display only)",
+    missing: "unavailable",
+  }[source] || "unknown source");
+  const executionSource = (source) => ({
+    direct_broker_quote: "execution-eligible direct quote",
+    paper_reference: "paper reference (simulated execution-eligible only)",
+    unavailable: "not execution-eligible",
+  }[source] || "not execution-eligible");
+  const legPriceTitle = (label, price, quote, execution) =>
+    `${label} ${n(price)} (${quoteSource(quote)}; ${executionSource(execution)})`;
+  body.innerHTML = rows.map((row, index) => {
     const move = row.change_price > 0 ? "up" : row.change_price < 0 ? "down" : "mut";
     const percent = row.change_pct == null ? "—" : n(row.change_pct) + "%";
     const warning = row.error ? ` <span class="down" title="${esc(row.error)}">⚠</span>` : "";
     const atm = row.atm ? ' <span class="tagb">ATM</span>' : "";
-    return `<tr${row.atm ? ' style="background:#182b40"' : ""} title="${esc(row.error)}">
-      <td class="l"><strong>${n(row.strike, 0)}</strong>${atm}${warning}</td>
-      <td title="CE ${n(row.ce_ltp)} + PE ${n(row.pe_ltp)}">${n(row.straddle_price)}</td>
+    const canonical = !!(row.ce && row.pe && row.ce.chart_symbol && row.pe.chart_symbol);
+    const comboAttrs = canonical
+      ? ' title="Open the canonical CE + PE combo chart"'
+      : ' disabled title="Both canonical CE and PE contracts are required"';
+    const status = ["BUY", "SELL", "AVOID"].includes(row.status) ? row.status : "AVOID";
+    const tradeReady = canonical && row.trade_ready === true && status !== "AVOID";
+    const tradeReason = row.trade_unavailable_reason || (status === "AVOID"
+      ? "Status is AVOID; trading is disabled" : "This row is not trade-ready");
+    const tradePriceDescription = row.execution_price_source === "paper_reference"
+      ? "positive paper reference price(s) for simulated execution and current closed-candle indicators"
+      : "both legs have direct broker quotes and current closed-candle indicators";
+    const tradeAttrs = (wanted) => tradeReady && status === wanted
+      ? ` title="Trade-ready ${esc(status)} row: ${esc(tradePriceDescription)}"`
+      : ` disabled title="${esc(tradeReady ? `Status is ${status}; only ${status} is enabled` : tradeReason)}"`;
+    const priceTitle = legPriceTitle(
+      "CE", row.ce_ltp, row.ce_quote_source, row.ce_execution_price_source
+    ) + " + " + legPriceTitle(
+      "PE", row.pe_ltp, row.pe_quote_source, row.pe_execution_price_source
+    );
+    return `<tr${row.atm ? ' class="str-atm"' : ""} title="${esc(row.error)}">
+      <td class="l"><strong>${esc(Number(row.strike).toString())}</strong>${atm}${warning}</td>
+      <td title="${esc(priceTitle)}">${n(row.straddle_price)}</td>
       <td class="${move}" title="Previous close ${n(row.previous_close)}">${n(row.change_price)}</td>
       <td class="${move}">${percent}</td>
-      <td class="${straddleStateClass(row.vwap_position)}" title="VWAP ${n(row.vwap)}">${straddleStateLabel(row.vwap_position)}</td>
-      <td class="${straddleStateClass(row.supertrend_trend)}" title="Supertrend ${n(row.supertrend)}">${straddleStateLabel(row.supertrend_trend)}</td>
-      <td class="${straddleStateClass(row.ema_21_position)}" title="EMA 21 ${n(row.ema_21)}">${straddleStateLabel(row.ema_21_position)}</td>
+      <td>${n(row.close)}</td><td>${n(row.open)}</td><td>${n(row.high)}</td><td>${n(row.low)}</td>
+      <td>${straddleIndicator(row.vwap, row.vwap_position, "Advanced VWAP")}</td>
+      <td>${straddleIndicator(row.supertrend, row.supertrend_position, "Supertrend")}</td>
+      <td>${straddleIndicator(row.ema_21, row.ema_21_position, "EMA(21)")}</td>
+      <td class="${straddleStateClass(status)}"><strong>${esc(status)}</strong></td>
+      <td class="l" style="white-space:nowrap">
+        <button type="button" class="sm strCombo" data-str-row="${index}"${comboAttrs}>Combo chart</button>
+        <button type="button" class="sm go strTrade" data-str-row="${index}" data-str-dir="LONG"${tradeAttrs("BUY")}>Buy</button>
+        <button type="button" class="sm danger strTrade" data-str-row="${index}" data-str-dir="SHORT"${tradeAttrs("SELL")}>Sell</button>
+      </td>
     </tr>`;
   }).join("");
+  body.querySelectorAll(".strCombo").forEach((button) => {
+    button.onclick = () => {
+      const row = rows[Number(button.dataset.strRow)];
+      if (!row || !row.ce || !row.pe) return;
+      const lots = Math.max(1, Math.floor(Number($("strLots").value) || 1));
+      const legs = [row.ce, row.pe].map((leg) => `${leg.chart_symbol}@BUY@${lots}`).join(",");
+      window.open("/combo?" + new URLSearchParams({ legs, tf: tfCode(d.timeframe_minutes) }),
+                  "matheranCombo");
+    };
+  });
+  body.querySelectorAll(".strTrade").forEach((button) => {
+    button.onclick = () => {
+      const row = rows[Number(button.dataset.strRow)];
+      const wanted = button.dataset.strDir === "SHORT" ? "SELL" : "BUY";
+      if (!row || row.trade_ready !== true || row.status !== wanted) {
+        note((row && row.trade_unavailable_reason) || `Status is ${row && row.status || "AVOID"}; only ${wanted} rows can use this action.`);
+        return;
+      }
+      tradeStraddle(row, button.dataset.strDir, d, button);
+    };
+  });
+}
+
+async function tradeStraddle(row, direction, data, button) {
+  const wanted = direction === "SHORT" ? "SELL" : "BUY";
+  if (!row || !row.ce || !row.pe || row.trade_ready !== true || row.status !== wanted) {
+    note((row && row.trade_unavailable_reason) || `Status is ${row && row.status || "AVOID"}; only ${wanted} rows can use this action.`);
+    return;
+  }
+  const lots = Math.max(1, Math.floor(Number($("strLots").value) || 1));
+  const side = direction === "SHORT" ? "SELL" : "BUY";
+  const legs = [
+    { symbol: row.ce.chart_symbol, label: row.ce.display_name || row.ce.symbol,
+      side, quantity: lots * Math.max(1, Number(row.ce.lot_size) || 1), ltp: row.ce_ltp },
+    { symbol: row.pe.chart_symbol, label: row.pe.display_name || row.pe.symbol,
+      side, quantity: lots * Math.max(1, Number(row.pe.lot_size) || 1), ltp: row.pe_ltp },
+  ];
+  const name = `${data.underlying} ${Number(row.strike)} straddle ${side.toLowerCase()}`;
+  const rollbackWarning = "Legs are submitted sequentially because the broker has no atomic " +
+    "multi-leg order. If a leg fails, rollback is attempted for every leg already sent. " +
+    "If rollback fails or remains in flight, residual exposure requires immediate operator action.";
+  const choice = await orderDialog({
+    title: `${side} ${data.underlying} ${Number(row.strike)} straddle`,
+    sub: rollbackWarning + ` Each leg uses ${lots} lot${lots === 1 ? "" : "s"} and its configured protective exits.`,
+    confirmWarning: rollbackWarning,
+    legs, side, product: RISK.default_product, exitMode: RISK.exit_mode, cashShort: false,
+  });
+  if (!choice) return;
+  button.disabled = true;
+  let basket = null;
+  try {
+    basket = await api("/api/baskets", { method: "POST", body: JSON.stringify({
+      name, timeframe_minutes: Number(data.timeframe_minutes),
+      legs: [row.ce, row.pe].map((leg) => ({ symbol: leg.chart_symbol, direction, lots })),
+      stop_loss_pct: null, target_pct: null, product: choice.product, exit_mode: choice.exit_mode,
+    }) });
+    const result = await api(`/api/baskets/${basket.id}/execute`, { method: "POST",
+      body: JSON.stringify({
+        confirm: true,
+        rollback_on_failure: true,
+        ...choice,
+        straddle_guard: {
+          underlying: data.underlying,
+          expiry: data.expiry,
+          strike: Number(row.strike),
+          timeframe_minutes: Number(data.timeframe_minutes),
+          candle_type: data.candle_type || "normal",
+          side: direction,
+        },
+      }) });
+    const failed = (result.legs || []).filter((leg) => leg.status === "failed");
+    const skipped = (result.legs || []).filter((leg) => leg.status === "skipped");
+    const rollback = result.rollback || {};
+    const cause = failed.map((leg) => `${leg.label || leg.symbol}: ${leg.error}`).join("; ");
+    if (rollback.triggered && rollback.residual_exposure) {
+      const residual = (rollback.results || []).filter((item) => item.residual_exposure)
+        .map((item) => `${item.label || item.symbol}: ${item.detail || item.status}`).join("; ");
+      note(`${rollback.error || rollback.warning || "CRITICAL — residual partial exposure remains."} ` +
+        `${result.sent} leg${result.sent === 1 ? " was" : "s were"} acknowledged as sent; ${rollback.compensated || 0} confirmed compensated. ` +
+        `${cause}${residual ? "; " + residual : ""} Open Trade/Baskets now.`);
+    } else if (rollback.triggered && rollback.attempted) {
+      note(`COMPENSATED — sequential straddle submission stopped after a leg failed; ` +
+        `${rollback.compensated} previously sent leg${rollback.compensated === 1 ? " is" : "s are"} confirmed flat. ` +
+        `${cause}${skipped.length ? `; ${skipped.length} later leg(s) were not sent` : ""}.`);
+    } else if (rollback.triggered) {
+      note(`No partial exposure: the first leg failed and no later leg was sent. ${cause}`);
+    } else if (failed.length || skipped.length) {
+      note(`${result.sent} of ${result.legs.length} legs sent. ` +
+        [...failed, ...skipped].map((leg) => `${leg.label || leg.symbol}: ${leg.error}`).join("; "));
+    } else {
+      note(`${side} straddle basket executed sequentially: ${result.sent} ${result.order_type === "LIMIT" ? "limit orders working" : "orders sent"} ` +
+        `(${result.mode}, ${String(result.product || "").toLowerCase()}).`, "ok");
+    }
+  } catch (e) { note(e.message); }
+  if (basket) {
+    loadTrade();
+    loadBaskets();
+  }
+  button.disabled = row.trade_ready !== true || row.status !== wanted;
 }
 $("und").onchange = loadExpiries;
 $("autoScan").onchange = () => {
@@ -1840,6 +2052,7 @@ async function scan() {
   const q = new URLSearchParams({
     underlying: $("und").value, otm: $("otm").value,
     timeframe_minutes: $("otf").value, reference: $("ref").value, adx_min: $("amin").value,
+    candle_type: $("optCandle").value,
   });
   if ($("exp").value) q.set("expiry", $("exp").value);
   $("btnScan").disabled = true;
@@ -1848,8 +2061,9 @@ async function scan() {
     const d = await api("/api/options/chain?" + q.toString());
     $("chainMeta").textContent =
       d.underlying + " " + d.expiry + " · " + d.reference + " " + d.reference_symbol + " " + n(d.spot) +
-      " · ATM " + d.atm_strike + " · step " + d.strike_step + " · " + tfCode(d.timeframe_minutes) + " · ADX>" +
-      n(d.adx_min,0) + " · " + d.above_vwap.length + " above VWAP · " + d.entry_ready.length + " entry-ready" +
+      " · ATM " + d.atm_strike + " · step " + d.strike_step + " · " + tfCode(d.timeframe_minutes) +
+      " · " + (d.candle_type === "heikin_ashi" ? "Heikin Ashi" : "Normal candle") + " · ADX>" +
+      n(d.adx_min,0) + " · " + d.above_vwap.length + " above Advanced VWAP · " + d.entry_ready.length + " entry-ready" +
       (d.missing_legs && d.missing_legs.length ? " · not listed: " + d.missing_legs.join(", ") : "");
     renderChain(d);
   } catch (e) {
@@ -1920,6 +2134,7 @@ function renderChain(d) {
           security_id: btn.dataset.sid, underlying: $("und").value, expiry: d.expiry,
           strike: Number(btn.dataset.strike), option_type: btn.dataset.opt, lots,
           timeframe_minutes: Number($("otf").value), adx_min: Number($("amin").value),
+          candle_type: d.candle_type,
           confirm: true, ...choice,
         }) });
         const p = r.watch && r.watch.position;
@@ -1942,6 +2157,7 @@ function renderChain(d) {
           expiry: d.expiry, strike: Number(btn.dataset.strike),
           option_type: btn.dataset.opt, lots,
           timeframe_minutes: Number($("otf").value), adx_min: Number($("amin").value),
+          candle_type: d.candle_type,
         }) });
         note("Option watch added — see the Trade tab.", "ok");
       } catch (e) { note(e.message); }
@@ -2070,13 +2286,14 @@ function basketCard(b) {
       <button type="button" class="sm" data-bkchart="${esc(b.id)}"
         title="Combined basket value with indicators, beside each leg">Chart</button>
       <button type="button" class="sm go" data-bkexec="${esc(b.id)}"
-        ${b.status === "open" ? "disabled" : ""}>Execute</button>
+        ${["open", "uncertain"].includes(b.status) ? "disabled" : ""}
+        title="${b.status === "uncertain" ? "Broker acceptance is indeterminate; reconcile the broker terminal before retrying" : "Execute this basket"}">Execute</button>
       <button type="button" class="sm danger" data-bkexit="${esc(b.id)}"
         ${b.open_legs ? "" : "disabled"}>Exit all</button>
       ${b.status === "watching"
         ? `<button type="button" class="sm" data-bkdisarm="${esc(b.id)}">Stop watching</button>`
-        : `<button type="button" class="sm" data-bkarm="${esc(b.id)}" ${b.status === "open" ? "disabled" : ""}
-             title="Each leg waits for its own entry signal and asks for approval separately">Watch legs</button>`}
+        : `<button type="button" class="sm" data-bkarm="${esc(b.id)}" ${["open", "uncertain"].includes(b.status) ? "disabled" : ""}
+             title="${b.status === "uncertain" ? "Reconcile indeterminate broker acceptance before arming entries" : "Each leg waits for its own entry signal and asks for approval separately"}">Watch legs</button>`}
       <button type="button" class="sm" data-bkdel="${esc(b.id)}">Delete</button>
     </div>
     <div class="scroll"><table>
@@ -2261,6 +2478,7 @@ const SC = {
   next: 0,              // since cursor for /api/scanner/status
   results: [],
   pollTimer: null, pollSeq: 0,
+  watchState: new Map(), // scan id + seq + side -> adding/added/duplicate/retry
   ownJobs: new Set(),   // ids of the jobs this page started
   auto: null,           // auto-rescan: { interval, armed, timer, failures }; null = not armed
   lastState: "", lastDecile: -1, renderKey: "", focusCancel: false, estimate: null,
@@ -2282,19 +2500,19 @@ const fmtMS = (s) => { s = Math.max(0, Math.round(Number(s) || 0));
 const SC_BUY = makeRuleEditor({
   tbody: $("scBuyRows"), addBtn: $("scBuyAdd"), rows: () => SC.buy, catalog: () => SC.cat,
   label: "BUY condition", labelLower: "BUY condition", timeframes: true, reorder: true,
-  readOnly: () => false, colspan: 7, paramAttr: "pk",
-  emptyHtml: '<tr><td colspan="7" class="l mut">No BUY conditions: add at least one.</td></tr>',
+  readOnly: () => false, colspan: 8, paramAttr: "pk",
+  emptyHtml: '<tr><td colspan="8" class="l mut">No BUY conditions: add at least one.</td></tr>',
   newRow: (fresh) => ({ tf: "15m", join: "AND", left: fresh("close"), op: "above",
-                        right: fresh("vwap"), on: "live" }),
+                        right: fresh("vwap"), on: "live", candle_type: "normal" }),
   onChange: (rerender) => { SC.buyReset = false; scChanged(rerender ? "buy" : ""); },
 });
 const SC_SELL = makeRuleEditor({
   tbody: $("scSellRows"), addBtn: $("scSellAdd"), rows: () => SC.sell, catalog: () => SC.cat,
   label: "SELL condition", labelLower: "SELL condition", timeframes: true, reorder: true,
-  readOnly: () => SC.linked, colspan: 7, paramAttr: "pk",
-  emptyHtml: '<tr><td colspan="7" class="l mut">No SELL conditions: add at least one.</td></tr>',
+  readOnly: () => SC.linked, colspan: 8, paramAttr: "pk",
+  emptyHtml: '<tr><td colspan="8" class="l mut">No SELL conditions: add at least one.</td></tr>',
   newRow: (fresh) => ({ tf: "15m", join: "AND", left: fresh("close"), op: "below",
-                        right: fresh("vwap"), on: "live" }),
+                        right: fresh("vwap"), on: "live", candle_type: "normal" }),
   onChange: (rerender) => scChanged(rerender ? "sell" : ""),
 });
 
@@ -2366,8 +2584,10 @@ async function loadScanner() {
   scPreview();
   scEstimate();
   // Showing the tab (or a reload) re-reads the current scan from the start (since=0).
+  const overviewId = d.scan && d.scan.id ? d.scan.id : null;
+  if (overviewId !== SC.scanId) SC.watchState.clear();
   SC.scan = d.scan && d.scan.state ? d.scan : SC.scan;
-  SC.scanId = null;
+  SC.scanId = overviewId;
   SC.next = 0;
   SC.results = [];
   scPoll();
@@ -2625,6 +2845,7 @@ async function scRun(trigger, interval) {
     const s = r.scan || {};
     SC.ownJobs.add(s.id);
     // A new job: its results start at seq 1 (F11).
+    SC.watchState.clear();
     SC.scanId = s.id; SC.next = 0; SC.results = []; SC.scan = s;
     SC.lastState = s.state; SC.lastDecile = -1; SC.renderKey = "";
     scAnnounce("Scan started.");
@@ -2683,7 +2904,8 @@ async function scPoll() {
   if (mine !== SC.pollSeq) return;
   const s = d.scan || { state: "idle" };
   if (s.id && s.id !== SC.scanId) {
-    // A different job than the one held (a new run here or elsewhere): reset the cursor.
+    // A different job than the one held (a new run here or elsewhere): reset the cursor and action state.
+    SC.watchState.clear();
     SC.scanId = s.id; SC.next = 0; SC.results = []; SC.lastDecile = -1; SC.renderKey = "";
     if (since > 0) { scPoll(); return; }
   }
@@ -2908,25 +3130,39 @@ function scShortestTf() {
   }
   return best ? best.id : "5m";
 }
+function scWatchKey(scanId, seq, side) {
+  return `${scanId || ""}:${seq}:${side}`;
+}
+const scWatchUnavailable = (r) => SC.dataSource === "upstox" && r.exchange === "BSE";
 function scActions(r, side) {
   const label = esc(r.exchange) + ":" + esc(r.symbol);
-  if (!r.chartable) {
-    return `<span aria-hidden="true" title="not chartable here: listed by ISIN only">—</span><span class="sr">not chartable here: listed by ISIN only</span>`;
-  }
   const out = [];
-  if (r.chart && (r.exchange !== "MCX" || SC.mcxCharts)) {
+  if (r.chartable && r.chart && (r.exchange !== "MCX" || SC.mcxCharts)) {
     out.push(`<button type="button" class="sm" data-sc-chart="${esc(r.chart)}"
       data-sc-f="chart:${side}:${esc(r.seq)}" aria-label="Chart ${label}">Chart</button>`);
   }
-  if (r.tradable) {
-    const bse = r.exchange === "BSE";
-    out.push(`<button type="button" class="sm" data-sc-watch="${esc(r.seq)}" data-sc-side="${side}"
-      data-sc-f="watch:${side}:${esc(r.seq)}" aria-label="Watch ${label}"
-      ${bse ? 'aria-describedby="scBseNote" title="Opens the add-watch form. With Upstox market data, BSE watches do not get candles yet (see README)"'
-            : 'title="Opens the add-watch form, filled in; nothing is created until you press Watch there"'}>Watch</button>`);
+  if (r.tradable && (r.exchange === "NSE" || r.exchange === "BSE")) {
+    const key = scWatchKey(SC.scanId, r.seq, side);
+    const state = SC.watchState.get(key) || { state: "idle", error: "" };
+    const labels = { idle: "Add to watchlist", adding: "Adding…", added: "Added",
+                    duplicate: "Already watched", retry: "Retry" };
+    const unavailable = scWatchUnavailable(r);
+    const text = unavailable ? "BSE watch unavailable" : (labels[state.state] || labels.idle);
+    const locked = unavailable || state.state === "adding" || state.state === "added" || state.state === "duplicate";
+    const explanation = unavailable
+      ? "BSE watch candles are unavailable when Upstox is the active data source; charting remains available."
+      : state.state === "retry" && state.error
+        ? state.error
+        : side === "SELL"
+          ? "Create a normal one-share SHORT intraday watch. No order is placed; watch defaults apply."
+          : "Create a normal one-share LONG watch. No order is placed; watch defaults apply.";
+    out.push(`<button type="button" class="sm${state.state === "added" ? " go" : ""}"
+      data-sc-watch="${esc(r.seq)}" data-sc-side="${side}" data-sc-job="${esc(SC.scanId || "")}"
+      data-sc-f="watch:${side}:${esc(r.seq)}" aria-label="${esc(text)} ${label}"
+      title="${esc(explanation)}" ${locked ? "disabled" : ""}>${esc(text)}</button>`);
   }
   return out.length ? out.join(" ")
-    : `<span aria-hidden="true" title="charts of MCX need the Upstox data provider">—</span><span class="sr">no action</span>`;
+    : `<span aria-hidden="true" title="No action is available for this row">—</span><span class="sr">no action</span>`;
 }
 function scTable(side, s, filter, minMet) {
   const cols = (s.columns || {})[side] || [];
@@ -2984,7 +3220,7 @@ function scRenderResults() {
     return;
   }
   const filter = $("scFilter").value, minMet = Number($("scMinMet").value) || 0;
-  const key = [s.id, s.state, SC.results.length, filter, minMet, SC.mcxCharts,
+  const key = [s.id, s.state, SC.results.length, filter, minMet, SC.mcxCharts, SC.dataSource,
                JSON.stringify(SC.sort)].join("|");
   if (key !== SC.renderKey) {
     SC.renderKey = key;
@@ -3005,9 +3241,40 @@ function scRenderResults() {
       b.onclick = () => openCharts([b.dataset.scChart], scShortestTf());
     });
     box.querySelectorAll("[data-sc-watch]").forEach((b) => {
-      b.onclick = () => {
+      b.onclick = async () => {
+        const scanId = b.dataset.scJob;
+        const side = b.dataset.scSide;
+        if (!scanId || scanId !== SC.scanId) return;
         const r = SC.results.find((x) => String(x.seq) === b.dataset.scWatch);
-        if (r) prefillWatch(r.symbol, r.exchange, b.dataset.scSide === "SELL" ? "SHORT" : "LONG");
+        if (!r || !r.tradable || !["NSE", "BSE"].includes(r.exchange) || scWatchUnavailable(r)) return;
+        const key = scWatchKey(scanId, r.seq, side);
+        SC.watchState.set(key, { state: "adding", error: "" });
+        SC.renderKey = "";
+        scRenderResults();
+        let refreshWatches = false;
+        try {
+          const body = {
+            symbol: r.symbol,
+            exchange: r.exchange,
+            direction: side === "SELL" ? "SHORT" : "LONG",
+            quantity: 1,
+          };
+          if (side === "SELL") body.product = "INTRADAY";
+          await api("/api/watches", { method: "POST", body: JSON.stringify(body) });
+          SC.watchState.set(key, { state: "added", error: "" });
+          refreshWatches = true;
+        } catch (e) {
+          if (/\bis already being watched \(watch\b/i.test(e.message)) {
+            SC.watchState.set(key, { state: "duplicate", error: e.message });
+            refreshWatches = true;
+          } else {
+            SC.watchState.set(key, { state: "retry", error: e.message });
+            note(e.message);
+          }
+        }
+        if (refreshWatches) loadTrade();
+        SC.renderKey = "";
+        scRenderResults();
       };
     });
     if (focused) {
@@ -3044,15 +3311,6 @@ $("scFilter").onchange = () => {
   scRenderResults();
 };
 $("scMinMet").oninput = () => scRenderResults();
-
-/* Fill the Trade tab's add-watch form; nothing is created until Watch is pressed there. */
-function prefillWatch(symbol, exchange, dir) {
-  $("sym").value = symbol;
-  $("exch").value = exchange === "BSE" ? "BSE" : "NSE";
-  $("dir").value = dir;
-  showTab("trade");
-  $("qty").focus();
-}
 
 /* ---------------------------------------------------------------- refresh */
 async function refresh() {

@@ -1,7 +1,7 @@
 """Entry and exit rules.
 
 Entry (long only), evaluated on the last CLOSED candle of the chosen timeframe:
-  0. LTP > session VWAP
+  0. LTP > session Advanced VWAP
   1. RSI(21) above EMA(RSI(21), 21)
   2. price above Supertrend(21, 0.618)
   3. options only: ADX(14) > 20
@@ -116,7 +116,7 @@ def evaluate_entry(
 ) -> SignalResult:
     """Entry gate for either direction.
 
-    A short is the exact mirror of a long: price below VWAP instead of above, RSI
+    A short is the exact mirror of a long: price below Advanced VWAP instead of above, RSI
     below its signal line, price below Supertrend. ADX is directionless, so that
     check is unchanged. Every sub-condition is reported so the approval card can show
     exactly why the engine wants in.
@@ -140,14 +140,14 @@ def evaluate_entry(
 
     side_word = "below" if short else "above"
 
-    # 0. current price on the right side of session VWAP
+    # 0. current price on the right side of session Advanced VWAP
     vwap = snap.vwap
     ok_vwap = vwap is not None and (price < vwap if short else price > vwap)
     checks[f"price_{side_word}_vwap"] = ok_vwap
     if not ok_vwap:
         reasons.append(
-            f"price {price:.2f} is not {side_word} VWAP {vwap:.2f}" if vwap is not None
-            else "VWAP unavailable"
+            f"price {price:.2f} is not {side_word} Advanced VWAP {vwap:.2f}" if vwap is not None
+            else "Advanced VWAP unavailable"
         )
 
     # 1. RSI on the right side of its 21-EMA signal line

@@ -9,6 +9,7 @@ CHAIN_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="/static/ui-theme.js"></script>
 <title>Matheran option chain</title>
 <style>
   :root {
@@ -90,7 +91,26 @@ CHAIN_HTML = r"""<!DOCTYPE html>
   #bkLegs td { padding:3px 7px; }
   #bkMsg { margin:6px 0 0; font-size:12.5px; }
   #bkMsg.bad { color:#ffb3b3; } #bkMsg.ok { color:#8ee29e; }
+
+  @media (max-width:760px) {
+    header { position:static; padding:7px 8px; gap:8px; align-items:center; }
+    header h1 { width:100%; margin-bottom:0; }
+    header label.f { flex:1 1 105px; min-width:0; }
+    header input.und, header select { width:100%; max-width:100%; }
+    header .grow { display:none; }
+    #undHint { flex:1 1 100%; }
+    main { padding:8px; max-width:100%; overflow:hidden; }
+    .meta { gap:6px 12px; }
+    aside.basket { position:static; max-height:none; margin-top:10px; padding:9px 8px; }
+    .bkhead { align-items:stretch; }
+    .bkhead > * { max-width:100%; }
+    .bkhead input.name { width:100%; flex:1 1 100%; }
+    .bkhead label.f { flex:1 1 130px; justify-content:space-between; }
+    .bkhead .grow { display:none; }
+    .bkhead button { flex:1 1 120px; }
+  }
 </style>
+<link rel="stylesheet" href="/static/ui-theme.css" />
 </head>
 <body>
 <header>
@@ -112,6 +132,9 @@ CHAIN_HTML = r"""<!DOCTYPE html>
       <option value="120000">120s</option></select></label>
   <button type="button" id="load" class="go">Load chain</button>
   <span id="undHint" class="mut" style="font-size:11.5px;align-self:center">type an index or F&amp;O stock</span>
+  <label class="theme-picker" for="themeSelect">Theme
+    <select id="themeSelect" data-theme-select><option value="night">Night</option><option value="light">Light</option></select>
+  </label>
   <div class="grow"></div>
   <span id="status" class="pill" role="status" aria-live="polite">…</span>
 </header>

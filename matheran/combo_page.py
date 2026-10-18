@@ -4,7 +4,7 @@
     |  underlying spot     |  call legs           |
     +----------------------+----------------------+
     |  combined premium    |  put legs            |
-    |  + VWAP / EMA / ST   |                      |
+    |  + Advanced VWAP / EMA / ST   |                      |
     +----------------------+----------------------+
 
 The arithmetic lives in combo.py; this page only draws what /api/combo returns.
@@ -16,6 +16,7 @@ COMBO_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="/static/ui-theme.js"></script>
 <title>Matheran basket combo</title>
 <script src="/static/lightweight-charts.standalone.production.js"></script>
 <style>
@@ -105,7 +106,25 @@ COMBO_HTML = r"""<!DOCTYPE html>
   .tbl tr.calls td { background:#0f2f2c; }
   .tbl tr.puts td { background:#2a1633; }
   .tbl tr.total td { background:#2a2f36; font-weight:650; }
+
+  body { display:flex; flex-direction:column; }
+  main { flex:1; min-height:0; height:auto; }
+  @media (max-width:900px) {
+    header { padding:7px 8px; align-items:center; }
+    header h1 { flex:1 1 100%; }
+    header .grow { display:none; }
+    header label.f, header details.drop { flex:1 1 112px; min-width:0; }
+    header select, header details.drop > summary { width:100%; max-width:100%; }
+    header .pill { flex:1 1 100%; max-width:100%; }
+    main { width:100%; padding:6px; }
+    .dropbody { position:fixed; top:8px; left:8px; right:8px; width:auto; min-width:0;
+      max-height:calc(100dvh - 16px); overflow:auto; }
+    .tbl { max-width:calc(100% - 12px); width:calc(100% - 12px); }
+    .bar { flex-wrap:wrap; }
+    .bar .last { margin-left:auto; }
+  }
 </style>
+<link rel="stylesheet" href="/static/ui-theme.css" />
 </head>
 <body>
 <header>
@@ -129,7 +148,7 @@ COMBO_HTML = r"""<!DOCTYPE html>
     <summary>Indicators</summary>
     <div class="dropbody" id="indList">
       <div class="indrow"><input type="checkbox" id="iVwap" /><span class="swatch" style="background:#f59e0b"></span>
-        <label for="iVwap">VWAP (session)</label></div>
+        <label for="iVwap">Advanced VWAP (session)</label></div>
       <div class="indrow"><input type="checkbox" id="iEma1" /><span class="swatch" style="background:#22d3ee"></span>
         <label for="iEma1">EMA 1</label>
         <input type="number" id="iEma1Len" min="1" max="500" step="1" aria-label="EMA 1 length" /></div>
@@ -150,6 +169,9 @@ COMBO_HTML = r"""<!DOCTYPE html>
       <option value="15000">15s</option><option value="60000">60s</option></select></label>
   <label class="inline" for="sync"><input type="checkbox" id="sync" /> Sync time</label>
   <label class="inline" for="showTbl"><input type="checkbox" id="showTbl" /> Table</label>
+  <label class="theme-picker" for="themeSelect">Theme
+    <select id="themeSelect" data-theme-select><option value="night">Night</option><option value="light">Light</option></select>
+  </label>
   <div class="grow"></div>
   <span id="status" class="pill" role="status" aria-live="polite">…</span>
 </header>
@@ -244,6 +266,17 @@ function setStatus(text, bad) {
   $("status").title = text;
   $("status").className = "pill" + (bad ? " bad" : "");
 }
+function chartThemeOptions() {
+  const css = getComputedStyle(document.documentElement);
+  const value = (name) => css.getPropertyValue(name).trim();
+  return {
+    layout: { background: { color: value("--chart-bg") }, textColor: value("--chart-text"),
+              attributionLogo: false },
+    grid: { vertLines: { color: value("--chart-grid") }, horzLines: { color: value("--chart-grid") } },
+    rightPriceScale: { borderColor: value("--chart-border") },
+    timeScale: { borderColor: value("--chart-border") },
+  };
+}
 
 /* Bar times are UNIX seconds, which the library labels in UTC; every label is shown
    in IST instead, as on the charts page. */
@@ -271,12 +304,13 @@ function istCrosshair(time) {
 const P = {};
 function makePane(key, cap) {
   const host = $("c" + cap);
+  const theme = chartThemeOptions();
   const chart = LWC.createChart(host, {
-    layout: { background: { color: "#171c22" }, textColor: "#9aa7b4", attributionLogo: false },
-    grid: { vertLines: { color: "#222a33" }, horzLines: { color: "#222a33" } },
-    rightPriceScale: { borderColor: "#2a323c", scaleMargins: { top: 0.08, bottom: 0.08 } },
+    layout: theme.layout,
+    grid: theme.grid,
+    rightPriceScale: { ...theme.rightPriceScale, scaleMargins: { top: 0.08, bottom: 0.08 } },
     localization: { timeFormatter: istCrosshair },
-    timeScale: { borderColor: "#2a323c", timeVisible: true, secondsVisible: false, rightOffset: 3,
+    timeScale: { ...theme.timeScale, timeVisible: true, secondsVisible: false, rightOffset: 3,
                  tickMarkFormatter: istTick },
     crosshair: { mode: LWC.CrosshairMode.Normal },
     autoSize: true,
@@ -287,6 +321,12 @@ function makePane(key, cap) {
   };
   chart.timeScale().subscribeVisibleTimeRangeChange((range) => syncFrom(P[key], range));
 }
+window.addEventListener("matheran-theme-change", () => {
+  const theme = chartThemeOptions();
+  for (const pane of Object.values(P)) {
+    try { pane.chart.applyOptions(theme); } catch (e) {}
+  }
+});
 
 function ensureMain(p, style, colours) {
   if (p.main && p.style === style) return;
@@ -427,7 +467,7 @@ async function refresh(full) {
 function render(d) {
   const legs = (d.table && d.table.legs) || [];
 
-  // Underlying spot, with the strategy's VWAP, EMA and Supertrend.
+  // Underlying spot, with the strategy's Advanced VWAP, EMA and Supertrend.
   const sp = P.spot, spot = d.spot || {};
   ensureMain(sp, "candles", { up: C.up, down: C.down, line: C.comboLine });
   sp.titleEl.textContent = (spot.symbol || "").replace(/^idx:/, "").replace(/^eq:NSE:/, "") + " spot";
@@ -438,7 +478,7 @@ function render(d) {
   setLine(sp, "ema", si.ema_price, C.spotEma, true, 1);
   setTrend(sp, "st", si.supertrend, true);
 
-  // Combined premium, with the script's VWAP, two EMAs and Supertrend.
+  // Combined premium, with the script's Advanced VWAP, two EMAs and Supertrend.
   const cb = P.combo, ind = state.ind;
   ensureMain(cb, state.comboStyle, { up: C.up, down: C.down, line: C.comboLine });
   cb.titleEl.textContent = "Combo premium (points) · " + d.name;

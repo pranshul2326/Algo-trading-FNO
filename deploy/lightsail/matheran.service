@@ -1,0 +1,28 @@
+[Unit]
+Description=Matheran trading dashboard and engine
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=matheran
+Group=matheran
+WorkingDirectory=/opt/matheran/app
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/matheran/venv/bin/python /opt/matheran/app/run.py -c /opt/matheran/app/config.yaml serve --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGINT
+UMask=0077
+
+# Basic process hardening. The application directory remains writable because the
+# settings UI atomically replaces config.yaml and .env and the engine persists data.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

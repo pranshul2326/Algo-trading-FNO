@@ -152,8 +152,8 @@ def cmd_chain(args) -> int:
             f"{args.timeframe}m candles\n"
         )
         head = (
-            f"{'CONTRACT':<26}{'TYPE':>5}{'STRIKE':>9}{'MONEY':>7}{'LTP':>10}{'VWAP':>10}"
-            f"{'>VWAP':>7}{'RSI':>8}{'EMA(RSI)':>10}{'EMA21':>9}{'SUPERT':>10}{'ADX':>7}{'READY':>7}"
+            f"{'CONTRACT':<26}{'TYPE':>5}{'STRIKE':>9}{'MONEY':>7}{'LTP':>10}{'Advanced VWAP':>10}"
+            f"{'>Advanced VWAP':>7}{'RSI':>8}{'EMA(RSI)':>10}{'EMA21':>9}{'SUPERT':>10}{'ADX':>7}{'READY':>7}"
         )
         print(head)
         print("-" * len(head))
@@ -176,7 +176,7 @@ def cmd_chain(args) -> int:
 
         above = [r for r in rows if r.price_above_vwap]
         ready = [r for r in rows if r.entry_ready]
-        print(f"\n{len(above)} strikes trading above VWAP, {len(ready)} meeting every entry condition")
+        print(f"\n{len(above)} strikes trading above Advanced VWAP, {len(ready)} meeting every entry condition")
         if ready:
             print("entry-ready:")
             for r in ready:
